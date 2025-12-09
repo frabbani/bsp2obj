@@ -24,7 +24,7 @@ LDFLAGS := `pkg-config --libs glib-2.0`
 all: bsp2obj
 
 # Include lodepng (lodepng.c is bundled in the repo)
-bsp2obj: bsp2obj.o lodepng.o
+bsp2obj: bsp2obj.o lodepng.o vec.o mesh.o mygltf.o
 	$(CC) $^ $(LDFLAGS) -o $@
 
 clean:
