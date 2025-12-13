@@ -23,7 +23,7 @@
 
 #include "lodepng.h"
 #include "mesh.h"
-#include "vec.h"
+#include "mygltf.h"
 
 #define SWAP(a, b)                                                             \
   do {                                                                         \
@@ -31,11 +31,6 @@
     a = b;                                                                     \
     b = tmp;                                                                   \
   } while (0)
-
-#define SCALE 10000.0f
-
-// quantize float to int
-static inline gint qf(gfloat x) { return (gint)lrintf(x * SCALE); }
 
 struct entry_s {
   guint32 offset;
@@ -272,7 +267,7 @@ guint *create_lmap_lut(const struct lmap_s *lmaps, guint num_lmaps) {
   return lut;
 }
 
-void export_mesh_obj(struct mesh_s *mesh, gfloat scale) {
+void export_mesh_with_lmap_to_obj(struct mesh_s *mesh, gfloat scale) {
   GString *obj = g_string_new(NULL);
   /*
   newmtl lightmap
@@ -285,7 +280,19 @@ void export_mesh_obj(struct mesh_s *mesh, gfloat scale) {
   map_Kd lightmap.png
   */
   // Write material
-  g_string_append(obj, "mtllib output.mtl\n");
+  g_string_append_printf(obj, "newmtl lightmap\n");
+  g_string_append(obj, "Ka 1 1 1\n");
+  g_string_append(obj, "Kd 1 1 1\n");
+  g_string_append(obj, "Ks 0 0 0\n");
+  g_string_append(obj, "Tr 1\n");
+  g_string_append(obj, "illum 1\n");
+  g_string_append(obj, "Ns 0\n");
+  g_string_append(obj, "map_Kd lightmap.png\n");
+  g_file_set_contents("lightmap.mtl", obj->str, obj->len, NULL);
+
+  g_string_free(obj, TRUE);
+  obj = g_string_new(NULL);
+  g_string_append(obj, "mtllib lightmap.mtl\n");
   g_string_append(obj, "usemtl lightmap\n");
 
   // Write vertices
@@ -298,7 +305,7 @@ void export_mesh_obj(struct mesh_s *mesh, gfloat scale) {
   // Write texture coordinates
   for (guint i = 0; i < mesh->vertices->len; i++) {
     struct vertex_s *v = &g_array_index(mesh->vertices, struct vertex_s, i);
-    g_string_append_printf(obj, "vt %g %g\n", v->uv.x, v->uv.y);
+    g_string_append_printf(obj, "vt %g %g\n", v->uvs[1].x, v->uvs[1].y);
   }
 
   // Write faces
@@ -435,7 +442,6 @@ int main(int argc, char **argv) {
   gchar *buf = NULL;
   gsize buf_len = 0;
   struct rgb_s *palette = NULL;
-  struct mesh_s *mesh = NULL;
 
   if (argc != 2) {
     g_print("usage: %s <map.bsp>\n", argv[0]);
@@ -448,9 +454,6 @@ int main(int argc, char **argv) {
     g_error_free(err);
     return 1;
   }
-
-  mesh = g_new(struct mesh_s, 1);
-  init_mesh(mesh);
 
   GHashTable *map = g_hash_table_new(g_direct_hash, g_direct_equal);
   GString *obj = g_string_new(NULL);
@@ -516,7 +519,7 @@ int main(int argc, char **argv) {
         img_data[j * 4 + 2] = col.b;
         img_data[j * 4 + 3] = 255;
       }
-      gchar *img_file = g_strdup_printf("textures/%s.png", miptex->name);
+      gchar *img_file = g_strdup_printf("export/textures/%s.png", miptex->name);
       unsigned error = lodepng_encode32_file(img_file, img_data, miptex->width,
                                              miptex->height);
       if (error) {
@@ -639,9 +642,9 @@ int main(int argc, char **argv) {
     g_hash_table_remove_all(map);
 
     if (k == 0) {
-      out_file = g_strdup_printf("%s.obj", map_name);
+      out_file = g_strdup_printf("export/%s.obj", map_name);
     } else {
-      out_file = g_strdup_printf("%s_%d.obj", map_name, k);
+      out_file = g_strdup_printf("export/%s_%d.obj", map_name, k);
     }
 
     /* Deduplicate consecutive identical usemtl lines to reduce file bloat. */
@@ -668,7 +671,8 @@ int main(int argc, char **argv) {
   guint *lmap_lut = create_lmap_lut(lmaps, face_count);
   // Extract a single model containing lightmap UVs
   struct model_s *model = &models[0];
-
+  struct mesh_s *mesh = g_new(struct mesh_s, 1);
+  init_mesh(mesh);
   for (gint i = 0; i < model->face_num; i++) {
     gint face_id = model->face_id + i;
     struct face_s *face = &faces[face_id];
@@ -684,18 +688,23 @@ int main(int argc, char **argv) {
       gint vtx =
           edges_list[face->ledge_id + j] < 0 ? edge->vertex1 : edge->vertex0;
       struct vec3_s position = vertices[vtx];
-      gfloat s = vec3_dot(surface->vectorS, position) + surface->distS;
-      gfloat t = vec3_dot(surface->vectorT, position) + surface->distT;
-      struct vec2_s uv;
-      lmap_getUV(lm, s, t, &uv.x, &uv.y);
+      struct vec2_s st, uv;
+      st.x = vec3_dot(surface->vectorS, position) + surface->distS;
+      st.y = vec3_dot(surface->vectorT, position) + surface->distT;
+      lmap_getUV(lm, st.x, st.y, &uv.x, &uv.y);
       uv.x = (lm->atlas_x + uv.x) / atlas_width;
       uv.y = 1.0f - (lm->atlas_y + uv.y) / atlas_height;
-      guint vertex_index = mesh_add_get_vertex(mesh, position, uv);
-      poly_add_vertex(poly, vertex_index);
+      st.x /= miptex->width;
+      st.y = 1.0f - (st.y / miptex->height);
+      guint vertex_idx = mesh_add_get_vertex(mesh, position, st, uv);
+      poly_add_vertex(poly, vertex_idx);
     }
     triangulate_poly(poly);
   }
-  export_mesh_obj(mesh, 0.025f);
+  build_mesh(mesh);
+  export_mesh_with_lmap_to_obj(mesh, 0.025f);
+  export_mesh_with_mats_to_obj(mesh, 0.025f);
+  export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf");
 
   g_hash_table_unref(map);
   g_string_free(obj, TRUE);
@@ -707,6 +716,7 @@ int main(int argc, char **argv) {
   g_free(lmap_lut);
   g_free(palette);
   free_mesh(&mesh);
+  g_free(mesh);
   g_print("Done. Goodbye!\n");
   return 0;
 }
@@ -758,42 +768,4 @@ int compare_lmap_fn(const gpointer a, const gpointer b) {
     return lm_b->width - lm_a->width;
   }
   return 0;
-}
-
-gboolean vertex_eq_fn(gconstpointer a, gconstpointer b) {
-  const struct vertex_s *va = (const struct vertex_s *)a;
-  const struct vertex_s *vb = (const struct vertex_s *)b;
-  gint a_u = qf(va->uv.x);
-  gint a_v = qf(va->uv.y);
-  gint a_x = qf(va->position.x);
-  gint a_y = qf(va->position.y);
-  gint a_z = qf(va->position.z);
-
-  gint b_u = qf(vb->uv.x);
-  gint b_v = qf(vb->uv.y);
-  gint b_x = qf(vb->position.x);
-  gint b_y = qf(vb->position.y);
-  gint b_z = qf(vb->position.z);
-
-  return a_x == b_x && a_y == b_y && a_u == b_u && a_v == b_v && a_z == b_z;
-}
-
-guint vertex_hash_fn(gconstpointer key) {
-  const struct vertex_s *v = key;
-  guint h = 2166136261u;
-
-#define MIX(i)                                                                 \
-  do {                                                                         \
-    h ^= (guint)(i);                                                           \
-    h *= 16777619u;                                                            \
-  } while (0)
-
-  MIX(qf(v->position.x));
-  MIX(qf(v->position.y));
-  MIX(qf(v->position.z));
-  MIX(qf(v->uv.x));
-  MIX(qf(v->uv.y));
-
-#undef MIX
-  return h;
 }

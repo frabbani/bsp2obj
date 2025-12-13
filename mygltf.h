@@ -3,22 +3,8 @@
 
 #include <glib.h>
 
-struct mygltf_material_s {
-  GString *name;
-  GArray *textures;
-};
+#include "mesh.h"
 
-struct mygltf_mesh_s {
-  GString *name;
-  GArray *vertices;
-  GArray *normals;
-  GArray *uvs;
-  GArray *indices;
-  struct mygltf_material_s *material;
-};
-
-struct mygltf_scene_s {
-  GArray *meshes;
-};
-
+void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
+                         const gchar *output_path);
 #endif // _MYGLTF_

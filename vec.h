@@ -4,16 +4,29 @@
 #include <glib.h>
 
 struct vec2_s {
-  gfloat x;
-  gfloat y;
+  union {
+    struct {
+      gfloat x;
+      gfloat y;
+    };
+    gfloat xy[2];
+  };
 };
 
 struct vec3_s {
-  gfloat x;
-  gfloat y;
-  gfloat z;
+  union {
+    struct {
+      gfloat x;
+      gfloat y;
+      gfloat z;
+    };
+    gfloat xyz[3];
+  };
 };
 
 gfloat vec3_dot(const struct vec3_s a, const struct vec3_s b);
+struct vec3_s vec3_set(gfloat x, gfloat y, gfloat z);
+struct vec3_s vec3_max(const struct vec3_s a, const struct vec3_s b);
+struct vec3_s vec3_min(const struct vec3_s a, const struct vec3_s b);
 
 #endif // _VEC_

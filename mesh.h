@@ -8,16 +8,15 @@ struct index_buffer_s {
   guint *indices;
   guint num_indices;
   guint capacity;
-  guint chunk_size;
 };
 
-void init_index_buffer(struct index_buffer_s *buffer, guint chunk_size);
+void init_index_buffer(struct index_buffer_s *buffer);
 void free_index_buffer(struct index_buffer_s *buffer);
 void add_index_to_buffer(struct index_buffer_s *buffer, guint index);
 
 struct vertex_s {
-  struct vec2_s uv;
   struct vec3_s position;
+  struct vec2_s uvs[2];
 };
 
 gboolean vertex_eq_fn(gconstpointer a, gconstpointer b);
@@ -27,6 +26,11 @@ struct tri_s {
   guint v0;
   guint v1;
   guint v2;
+};
+
+struct trilist_s {
+  guint num_tris;
+  struct tri_s *tris;
 };
 
 struct poly_s {
@@ -45,6 +49,7 @@ extern void free_poly(struct poly_s *poly);
 struct mat_s {
   gchar *name;
   struct index_buffer_s *polys;
+  struct trilist_s tris;
 };
 
 // guint material_hash_fn(gconstpointer key);
@@ -66,7 +71,11 @@ extern void init_mesh(struct mesh_s *mesh);
 extern struct poly_s *mesh_add_poly(struct mesh_s *mesh,
                                     const gchar *material_name);
 extern guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
-                                 struct vec2_s uv);
+                                 struct vec2_s uv, struct vec2_s uv2);
+extern void build_mesh(struct mesh_s *mesh);
+
 extern void free_mesh(struct mesh_s **mesh);
+
+extern void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale);
 
 #endif // _MESH_
