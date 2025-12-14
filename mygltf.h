@@ -6,5 +6,5 @@
 #include "mesh.h"
 
 void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
-                         const gchar *output_path);
+                         const gchar *output_path, GError **err);
 #endif // _MYGLTF_

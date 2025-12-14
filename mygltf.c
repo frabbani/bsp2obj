@@ -6,7 +6,7 @@
 #include "cgltf_write.h"
 
 void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
-                         const gchar *output_path) {
+                         const gchar *output_path, GError **err) {
   const GArray *vertices = mesh->vertices;
   const GPtrArray *mats = mesh->mats;
   cgltf_options options = {0};
@@ -50,6 +50,11 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
 
   // copy vertices (interleaved, already in the right layout)
   memcpy(buffer_data, vertices->data, vertex_buffer_size);
+  struct vertex_s *vs = (struct vertex_s *)buffer_data;
+  for (guint i = 0; i < vertex_count; i++) {
+    vs[i].uvs[0].y = 1.0f - vs[i].uvs[0].y;
+    vs[i].uvs[1].y = 1.0f - vs[i].uvs[1].y;
+  }
   g_print("count v. count: %f v %zu\n",
           (float)vertices->len / (float)sizeof(vertex_stride), vertex_count);
   // flatten indices per material into one big index buffer
@@ -67,9 +72,9 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
 
     for (guint t = 0; t < m->tris.num_tris; ++t) {
       struct tri_s *tri = &m->tris.tris[t];
-      index_ptr[running_index_offset++] = tri->v0;
-      index_ptr[running_index_offset++] = tri->v1;
       index_ptr[running_index_offset++] = tri->v2;
+      index_ptr[running_index_offset++] = tri->v1;
+      index_ptr[running_index_offset++] = tri->v0;
     }
   }
 
@@ -134,8 +139,8 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
         max = vec3_max(max, p);
       }
       acc_pos->has_min = acc_pos->has_max = 1;
-      memcpy(acc_pos->min, min.xyz, sizeof(min));
-      memcpy(acc_pos->max, max.xyz, sizeof(max));
+      memcpy(acc_pos->min, min.xyz, sizeof(min.xyz));
+      memcpy(acc_pos->max, max.xyz, sizeof(max.xyz));
     }
   }
 
@@ -171,18 +176,55 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
   data->materials_count = material_count;
   data->materials = ALLOC(material_count, sizeof(cgltf_material));
 
+  // Create images and textures for materials (diffuse PNGs at
+  // export/textures/<name>.png)
+  data->images_count = material_count;
+  data->images = ALLOC(material_count, sizeof(cgltf_image));
+  data->textures_count = material_count;
+  data->textures = ALLOC(material_count, sizeof(cgltf_texture));
+  // Register KHR_materials_unlit so materials render as pure albedo (no
+  // lighting)
+  data->extensions_used_count = 1;
+  data->extensions_used = ALLOC(1, sizeof(char *));
+  data->extensions_used[0] = "KHR_materials_unlit";
+
   for (guint i = 0; i < material_count; ++i) {
     cgltf_material *mat = &data->materials[i];
     struct mat_s *src = g_ptr_array_index(mats, i);
+    mat->name = ALLOC(1, 256);
+    strncpy(mat->name, src->name, 255);
 
-    mat->name = src->name; // assumes src->name stays alive long enough
-
+    // Wire a simple diffuse texture using the material name ->
+    // export/textures/<name>.png
+    cgltf_image *img = &data->images[i];
+    cgltf_texture *tex = &data->textures[i];
+    img->uri = ALLOC(1, 256);
+    gchar *uri = g_strdup_printf("export/textures/%s.png", src->name);
+    strncpy(img->uri, uri, 255);
+    g_free(uri); // free the temporary URI string
+    tex->image = img;
+    // Hook into the material's baseColorTexture (simple diffuse)
+    mat->pbr_metallic_roughness.base_color_texture.texture = tex;
+    mat->pbr_metallic_roughness.base_color_texture.texcoord = 0;
+    // Use a minimal material that references a base color texture only.
+    // We still use the pbr_metallic_roughness struct to attach baseColorTexture
+    // but we avoid setting metallic/roughness or base color factors.
     mat->has_pbr_metallic_roughness = 1;
+    mat->pbr_metallic_roughness.roughness_factor = 1.0f;
+    mat->pbr_metallic_roughness.metallic_factor = 0.0f;
     mat->pbr_metallic_roughness.base_color_factor[0] = 1.0f;
     mat->pbr_metallic_roughness.base_color_factor[1] = 1.0f;
     mat->pbr_metallic_roughness.base_color_factor[2] = 1.0f;
     mat->pbr_metallic_roughness.base_color_factor[3] = 1.0f;
-    // You can wire textures here later (baseColorTexture, etc.)
+    // mat->extensions_count = 0;
+    // mat->extensions = NULL;
+    // Mark material as unlit so the baseColorTexture is shown as-is (pure
+    // albedo)
+    mat->alpha_mode = cgltf_alpha_mode_opaque;
+    mat->extensions_count = 1;
+    mat->extensions = ALLOC(1, sizeof(cgltf_extension));
+    mat->extensions[0].name = "KHR_materials_unlit";
+    mat->extensions[0].data = NULL;
   }
 
   // -------- 7) Mesh + primitives (one per material) --------
@@ -241,6 +283,8 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
   cgltf_result res = cgltf_write_file(&options, output_path, data);
   if (res != cgltf_result_success) {
     fprintf(stderr, "cgltf_write_file failed: %d\n", (int)res);
+    g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "cgltf_write_file failed: %d", (int)res);
   }
   g_file_set_contents("mesh.bin", (const gchar *)buffer_data, total_buffer_size,
                       NULL);

@@ -704,7 +704,11 @@ int main(int argc, char **argv) {
   build_mesh(mesh);
   export_mesh_with_lmap_to_obj(mesh, 0.025f);
   export_mesh_with_mats_to_obj(mesh, 0.025f);
-  export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf");
+  export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
+  if (err != NULL) {
+    g_error("%s", err->message);
+    g_error_free(err);
+  }
 
   g_hash_table_unref(map);
   g_string_free(obj, TRUE);
