@@ -693,7 +693,7 @@ int main(int argc, char **argv) {
   g_print("mesh built. exporting...\n");
   export_mesh_with_lmap_to_obj(mesh, 0.025f);
   export_mesh_with_mats_to_obj(mesh, 0.025f);
-  // export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
+  export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
   if (err != NULL) {
     g_error("%s", err->message);
     g_error_free(err);

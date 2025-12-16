@@ -37,7 +37,7 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
   cgltf_size index_total_count = 0;
   for (guint i = 0; i < material_count; ++i) {
     struct mat_s *m = g_ptr_array_index(mats, i);
-    index_total_count += (cgltf_size)m->tris.num_tris * 3;
+    index_total_count += (cgltf_size)m->tris->len * 3;
   }
 
   // -------- 2) Buffer layout: [VERTICES][INDICES] --------
@@ -66,11 +66,11 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
 
   for (guint i = 0; i < material_count; ++i) {
     struct mat_s *m = g_ptr_array_index(mats, i);
-    per_mat_index_count[i] = (cgltf_size)m->tris.num_tris * 3;
+    per_mat_index_count[i] = (cgltf_size)m->tris->len * 3;
     per_mat_index_offset[i] = running_index_offset;
 
-    for (guint t = 0; t < m->tris.num_tris; ++t) {
-      struct tri_s *tri = &m->tris.tris[t];
+    for (guint t = 0; t < m->tris->len; ++t) {
+      struct tri_s *tri = &m->tris->data[t];
       index_ptr[running_index_offset++] = tri->v2;
       index_ptr[running_index_offset++] = tri->v1;
       index_ptr[running_index_offset++] = tri->v0;
