@@ -55,8 +55,7 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
     vs[i].uvs[0].y = 1.0f - vs[i].uvs[0].y;
     vs[i].uvs[1].y = 1.0f - vs[i].uvs[1].y;
   }
-  g_print("count v. count: %f v %zu\n",
-          (float)vertices->len / (float)sizeof(vertex_stride), vertex_count);
+
   // flatten indices per material into one big index buffer
   uint32_t *index_ptr = (uint32_t *)(buffer_data + vertex_buffer_size);
   cgltf_size running_index_offset = 0;
@@ -193,15 +192,12 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
     struct mat_s *src = g_ptr_array_index(mats, i);
     mat->name = ALLOC(1, 256);
     strncpy(mat->name, src->name, 255);
-
     // Wire a simple diffuse texture using the material name ->
     // export/textures/<name>.png
     cgltf_image *img = &data->images[i];
     cgltf_texture *tex = &data->textures[i];
-    img->uri = ALLOC(1, 256);
-    gchar *uri = g_strdup_printf("export/textures/%s.png", src->name);
-    strncpy(img->uri, uri, 255);
-    g_free(uri); // free the temporary URI string
+    img->uri = ALLOC(1, 128);
+    g_snprintf(img->uri, 128, "export/textures/%s.png", src->name);
     tex->image = img;
     // Hook into the material's baseColorTexture (simple diffuse)
     mat->pbr_metallic_roughness.base_color_texture.texture = tex;
@@ -230,13 +226,13 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
   // -------- 7) Mesh + primitives (one per material) --------
   data->meshes_count = 1;
   data->meshes = ALLOC(1, sizeof(cgltf_mesh));
-  cgltf_mesh *cmesh = &data->meshes[0];
+  cgltf_mesh *gltf_mesh = &data->meshes[0];
 
-  cmesh->primitives_count = material_count;
-  cmesh->primitives = ALLOC(material_count, sizeof(cgltf_primitive));
+  gltf_mesh->primitives_count = material_count;
+  gltf_mesh->primitives = ALLOC(material_count, sizeof(cgltf_primitive));
 
   for (guint i = 0; i < material_count; ++i) {
-    cgltf_primitive *prim = &cmesh->primitives[i];
+    cgltf_primitive *prim = &gltf_mesh->primitives[i];
 
     prim->type = cgltf_primitive_type_triangles;
     prim->material = &data->materials[i];
@@ -261,7 +257,7 @@ void export_mesh_to_gltf(const struct mesh_s *mesh, gfloat scale,
   // -------- 8) Node --------
   data->nodes_count = 1;
   data->nodes = ALLOC(1, sizeof(cgltf_node));
-  data->nodes[0].mesh = cmesh;
+  data->nodes[0].mesh = gltf_mesh;
   data->nodes[0].has_translation = 1;
   data->nodes[0].has_scale = 1;
   data->nodes[0].translation[0] = 0.0f;

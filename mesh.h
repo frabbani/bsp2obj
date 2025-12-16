@@ -4,15 +4,64 @@
 #include "vec.h"
 #include <glib.h>
 
-struct index_buffer_s {
-  guint *indices;
-  guint num_indices;
-  guint capacity;
+#define LIST(type, name)                                                       \
+  struct name##list_s {                                                        \
+    type *data;                                                                \
+    guint len;                                                                 \
+    guint capacity;                                                            \
+  };
+
+#define LISTOF(name) struct name##list_s
+
+#define LIST_INIT(list, initial_capacity)                                      \
+  {                                                                            \
+    list->data = g_new(typeof(*list->data), initial_capacity);                 \
+    list->len = 0;                                                             \
+    list->capacity = initial_capacity;                                         \
+  }
+
+#define LIST_APPEND(list, value)                                               \
+  do {                                                                         \
+    if (list->len >= list->capacity) {                                         \
+      list->capacity += list->capacity;                                        \
+      list->data =                                                             \
+          g_realloc(list->data, sizeof(*(list)->data) * list->capacity);       \
+    }                                                                          \
+    list->data[list->len++] = value;                                           \
+  } while (0);
+
+#define LIST_FREE(list)                                                        \
+  do {                                                                         \
+    g_free(list->data);                                                        \
+    list->data = NULL;                                                         \
+    list->len = 0;                                                             \
+    list->capacity = 0;                                                        \
+  } while (0);
+
+LIST(guint, index);
+
+struct rgb_s {
+  union {
+    struct {
+      guint8 b;
+      guint8 g;
+      guint8 r;
+    };
+    guint8 rgb[3];
+  };
 };
 
-void init_index_buffer(struct index_buffer_s *buffer);
-void free_index_buffer(struct index_buffer_s *buffer);
-void add_index_to_buffer(struct index_buffer_s *buffer, guint index);
+struct rgba_s {
+  union {
+    struct {
+      guint8 b;
+      guint8 g;
+      guint8 r;
+      guint8 a;
+    };
+    guint8 rgba[4];
+  };
+};
 
 struct vertex_s {
   struct vec3_s position;
@@ -28,10 +77,7 @@ struct tri_s {
   guint v2;
 };
 
-struct trilist_s {
-  guint num_tris;
-  struct tri_s *tris;
-};
+LIST(struct tri_s, tri);
 
 struct poly_s {
   gint face_id;
@@ -46,16 +92,18 @@ extern void init_poly(struct poly_s *poly, gint face_id);
 extern void triangulate_poly(struct poly_s *poly);
 extern void free_poly(struct poly_s *poly);
 
-struct mat_s {
-  gchar *name;
-  struct index_buffer_s *polys;
-  struct trilist_s tris;
+struct texinfo_s {
+  gchar name[64];
+  guint width;
+  guint height;
 };
 
-// guint material_hash_fn(gconstpointer key);
-// gboolean material_eq_fn(gconstpointer a, gconstpointer b);
-
-void free_mat(struct mat_s *mat);
+struct mat_s {
+  gchar name[64];
+  LISTOF(index) * polys;
+  LISTOF(tri) * tris;
+  guint width, height;
+};
 
 struct mesh_s {
   GHashTable
@@ -72,7 +120,8 @@ extern struct poly_s *mesh_add_poly(struct mesh_s *mesh,
                                     const gchar *material_name);
 extern guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
                                  struct vec2_s uv, struct vec2_s uv2);
-extern void build_mesh(struct mesh_s *mesh);
+extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
+                       guint num_texinfos);
 
 extern void free_mesh(struct mesh_s **mesh);
 

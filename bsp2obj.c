@@ -114,29 +114,6 @@ struct face_s {
   gint32 lightmap;
 };
 
-struct rgb_s {
-  union {
-    struct {
-      guint8 b;
-      guint8 g;
-      guint8 r;
-    };
-    guint8 rgb[3];
-  };
-};
-
-struct rgba_s {
-  union {
-    struct {
-      guint8 b;
-      guint8 g;
-      guint8 r;
-      guint8 a;
-    };
-    guint8 rgba[4];
-  };
-};
-
 struct lmap_s {
   gint face_id;
   gfloat mins[2];
@@ -205,10 +182,9 @@ void pack_lmaps(struct lmap_s *lmaps, guint num_lmaps, guint atlas_width,
     skyline[i] = 1;
   }
 
+  g_print("packing...\n");
   g_qsort_with_data(lmaps, num_lmaps, sizeof(struct lmap_s), compare_lmap_fn,
                     NULL);
-
-  g_print("packing...\n");
   for (guint i = 0; i < num_lmaps; i++) {
     struct lmap_s *lm = &lmaps[i];
     struct ivec2_s uv =
@@ -311,6 +287,7 @@ void export_mesh_with_lmap_to_obj(struct mesh_s *mesh, gfloat scale) {
   // Write faces
   for (guint i = 0; i < mesh->polys->len; i++) {
     struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, i);
+    // g_print("exporting poly %u with %u tris\n", i, poly->num_tris);
     for (guint j = 0; j < poly->num_tris; j++) {
       struct tri_s *tri = &poly->tris[j];
       g_string_append(obj, "f");
@@ -363,39 +340,39 @@ gboolean load_palette(const char *path, struct rgb_s **palette, GError **err) {
   return TRUE;
 }
 
-struct material_s {
+struct mtl_s {
   gchar name[64];
   GString *faces;
 };
 
-void material_free(gpointer data) {
-  struct material_s *mat = (struct material_s *)data;
-  g_string_free(mat->faces, TRUE);
-  g_free(mat);
+void mtl_free(gpointer data) {
+  struct mtl_s *mtl = (struct mtl_s *)data;
+  g_string_free(mtl->faces, TRUE);
+  g_free(mtl);
 }
 
 gchar *dedupe_obj_text(const gchar *text) {
   GHashTable *seen =
-      g_hash_table_new_full(g_str_hash, g_str_equal, g_free, material_free);
+      g_hash_table_new_full(g_str_hash, g_str_equal, g_free, mtl_free);
   gchar **lines = g_strsplit(text, "\n", 0);
   GString *result = g_string_new(NULL);
-  struct material_s *mat = NULL;
+  struct mtl_s *mtl = NULL;
   for (gint i = 0; lines[i] != NULL; i++) {
     gchar *line = lines[i];
     if (g_str_has_prefix(line, "usemtl ")) {
       gchar *name = line + 7; // Skip "usemtl "
       name = g_strstrip(name);
-      mat = g_hash_table_lookup(seen, name);
-      if (mat == NULL) {
-        mat = g_new(struct material_s, 1);
-        g_strlcpy(mat->name, name, sizeof(mat->name));
-        mat->faces = g_string_new(NULL);
-        g_hash_table_insert(seen, g_strdup(mat->name), mat);
+      mtl = g_hash_table_lookup(seen, name);
+      if (mtl == NULL) {
+        mtl = g_new(struct mtl_s, 1);
+        g_strlcpy(mtl->name, name, sizeof(mtl->name));
+        mtl->faces = g_string_new(NULL);
+        g_hash_table_insert(seen, g_strdup(mtl->name), mtl);
       }
     } else if (line[0] == 'f' && line[1] == ' ') {
-      if (mat) {
-        g_string_append(mat->faces, line);
-        g_string_append_c(mat->faces, '\n');
+      if (mtl) {
+        g_string_append(mtl->faces, line);
+        g_string_append_c(mtl->faces, '\n');
       }
       // skip if there is material.
     } else {
@@ -408,9 +385,9 @@ gchar *dedupe_obj_text(const gchar *text) {
   gpointer key, value;
   g_hash_table_iter_init(&iter, seen);
   while (g_hash_table_iter_next(&iter, &key, &value)) {
-    struct material_s *mat = (struct material_s *)value;
-    g_string_append_printf(result, "usemtl %s\n", mat->name);
-    g_string_append(result, mat->faces->str);
+    struct mtl_s *mtl = (struct mtl_s *)value;
+    g_string_append_printf(result, "usemtl %s\n", mtl->name);
+    g_string_append(result, mtl->faces->str);
   }
 
   gchar *deduped = g_string_free(result, FALSE);
@@ -442,6 +419,8 @@ int main(int argc, char **argv) {
   gchar *buf = NULL;
   gsize buf_len = 0;
   struct rgb_s *palette = NULL;
+  struct texinfo_s *texinfos = NULL;
+  guint num_texinfos = 0;
 
   if (argc != 2) {
     g_print("usage: %s <map.bsp>\n", argv[0]);
@@ -480,6 +459,7 @@ int main(int argc, char **argv) {
   map_name[strcspn(map_name, ".")] = '\0';
 
   // Extract materials and textures
+  texinfos = g_new(struct texinfo_s, mipheader->numtex);
   for (gint i = 0; i < mipheader->numtex; i++) {
     struct miptex_s *miptex =
         buf + header->miptex.offset + mipheader->offsets[i];
@@ -508,8 +488,14 @@ int main(int argc, char **argv) {
       g_print("Extracting texture '%s' (%ux%u) (offsets: %d, %d, %d, %d)\n",
               miptex->name, miptex->width, miptex->height, miptex->offset1,
               miptex->offset2, miptex->offset4, miptex->offset8);
+
       guchar *mip_data = (guchar *)buf + header->miptex.offset +
                          mipheader->offsets[i] + miptex->offset1;
+      g_strlcpy(texinfos[num_texinfos].name, miptex->name,
+                sizeof(texinfos->name) - 1);
+      texinfos[num_texinfos].width = miptex->width;
+      texinfos[num_texinfos].height = miptex->height;
+      num_texinfos++;
 
       for (gsize j = 0; j < img_size; j++) {
         struct rgb_s col = palette[mip_data[j]];
@@ -701,10 +687,13 @@ int main(int argc, char **argv) {
     }
     triangulate_poly(poly);
   }
-  build_mesh(mesh);
+  // build_mesh(mesh, texinfos, num_texinfos);
+  g_print("# of tex infos: %u\n", num_texinfos);
+  build_mesh(mesh, texinfos, num_texinfos);
+  g_print("mesh built. exporting...\n");
   export_mesh_with_lmap_to_obj(mesh, 0.025f);
   export_mesh_with_mats_to_obj(mesh, 0.025f);
-  export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
+  // export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
   if (err != NULL) {
     g_error("%s", err->message);
     g_error_free(err);
@@ -716,6 +705,7 @@ int main(int argc, char **argv) {
   for (guint i = 0; i < face_count; i++) {
     g_free(lmaps[i].data);
   }
+  g_free(texinfos);
   g_free(lmaps);
   g_free(lmap_lut);
   g_free(palette);

@@ -9,27 +9,28 @@
 // quantize float to int
 static inline gint qf(gfloat x) { return (gint)lrintf(x * SCALE); }
 
-void init_index_buffer(struct index_buffer_s *buffer) {
-  buffer->indices = g_new(guint, INDEX_BUFFER_CHUNK_SIZE);
-  buffer->num_indices = 0;
-  buffer->capacity = INDEX_BUFFER_CHUNK_SIZE;
+/*
+void init_index_list(struct indexlist_s *list) {
+  list->data = g_new(guint, INDEX_BUFFER_CHUNK_SIZE);
+  list->num_indices = 0;
+  list->capacity = INDEX_BUFFER_CHUNK_SIZE;
 }
 
-void free_index_buffer(struct index_buffer_s *buffer) {
-  g_free(buffer->indices);
-  buffer->indices = NULL;
-  buffer->num_indices = 0;
-  buffer->capacity = 0;
+void free_index_list(struct indexlist_s *list) {
+  g_free(list->indices);
+  list->indices = NULL;
+  list->num_indices = 0;
+  list->capacity = 0;
 }
 
-void add_index_to_buffer(struct index_buffer_s *buffer, guint index) {
-  if (buffer->num_indices >= buffer->capacity) {
-    buffer->capacity += buffer->capacity;
-    buffer->indices =
-        g_realloc(buffer->indices, sizeof(guint) * buffer->capacity);
+void add_index_to_list(struct indexlist_s *list, guint index) {
+  if (list->num_indices >= list->capacity) {
+    list->capacity += list->capacity;
+    list->indices = g_realloc(list->indices, sizeof(guint) * list->capacity);
   }
-  buffer->indices[buffer->num_indices++] = index;
+  list->indices[list->num_indices++] = index;
 }
+*/
 
 gboolean vertex_eq_fn(gconstpointer a, gconstpointer b) {
   const struct vertex_s *va = (const struct vertex_s *)a;
@@ -128,31 +129,26 @@ guint material_hash_fn(gconstpointer key) {
   return g_str_hash(mat->name->str);
 }
 */
-gboolean mat_eq_fn(gconstpointer a, gconstpointer b) {
-  const struct mat_s *ma = a;
-  const struct mat_s *mb = b;
 
+gint mat_cmp_fn(gconstpointer a, gconstpointer b) {
+  const struct mat_s *ma = *(const struct mat_s *const *)a;
+  const struct mat_s *mb = *(const struct mat_s *const *)b;
   if (ma == mb)
-    return TRUE;
-
-  if (!ma || !mb || !ma->name || !mb->name)
-    return FALSE;
-
-  return g_str_equal(ma->name, mb->name);
+    return 0;
+  return g_strcmp0(ma->name, mb->name);
 }
 
 void free_mat(struct mat_s *mat) {
   if (!mat)
     return;
   g_print("freeing material '%s' - %d polys (reserved %d), %d triangles\n",
-          mat->name, mat->polys->num_indices, mat->polys->capacity,
-          mat->tris.num_tris);
-  g_free(mat->name);
-  free_index_buffer(mat->polys);
+          mat->name, mat->polys->len, mat->polys->capacity, mat->tris->len);
+  memset(mat->name, 0, sizeof(mat->name));
+  LIST_FREE(mat->polys);
   g_free(mat->polys);
-  mat->tris.num_tris = 0;
-  g_free(mat->tris.tris);
-  mat->tris.tris = NULL;
+  LIST_FREE(mat->tris);
+  g_free(mat->tris);
+  mat->tris = NULL;
 }
 
 struct mat_s *mesh_add_get_material(struct mesh_s *mesh,
@@ -161,13 +157,13 @@ struct mat_s *mesh_add_get_material(struct mesh_s *mesh,
   if (val != NULL) {
     return (struct mat_s *)val;
   }
-
   struct mat_s *stored = g_new(struct mat_s, 1);
-  stored->name = g_strdup(material_name);
-  stored->polys = g_new(struct index_buffer_s, 1);
-  init_index_buffer(stored->polys);
+  g_strlcpy(stored->name, material_name, sizeof(stored->name) - 1);
+  stored->polys = g_new(LISTOF(index), 1);
+  LIST_INIT(stored->polys, 16);
   g_hash_table_insert(mesh->material_map, g_strdup(material_name), stored);
   g_ptr_array_add(mesh->mats, stored);
+  g_print("adding material '%s @ %u'\n", stored->name, mesh->mats->len - 1);
   return stored;
 }
 
@@ -187,7 +183,7 @@ struct poly_s *mesh_add_poly(struct mesh_s *mesh, const gchar *material_name) {
   g_array_append_val(mesh->polys, poly);
   guint index = mesh->polys->len - 1;
   struct mat_s *mat = mesh_add_get_material(mesh, material_name);
-  add_index_to_buffer(mat->polys, index);
+  LIST_APPEND(mat->polys, index);
   return &g_array_index(mesh->polys, struct poly_s, mesh->polys->len - 1);
 }
 
@@ -220,13 +216,40 @@ guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
   return index;
 }
 
-void build_mesh(struct mesh_s *mesh) {
-  g_ptr_array_sort(mesh->mats, (GCompareFunc)mat_eq_fn);
+static struct mat_s *find_mat(GPtrArray *sorted_mats, const gchar *name,
+                              gint *step_count) {
+  gint left = 0;
+  gint right = sorted_mats->len - 1;
+  if (step_count)
+    *step_count = 0;
+  while (left <= right) {
+    gint mid = left + (right - left) / 2;
+    struct mat_s *mat = g_ptr_array_index(sorted_mats, mid);
+    gint cmp = g_strcmp0(mat->name, name);
+    if (cmp == 0) {
+      return mat; // Found
+    } else if (cmp < 0) {
+      left = mid + 1;
+    } else {
+      right = mid - 1;
+    }
+    if (step_count)
+      (*step_count)++;
+  }
+  return NULL; // Not found
+}
+
+void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
+                guint num_texinfos) {
+  g_ptr_array_sort(mesh->mats, (GCompareFunc)mat_cmp_fn);
   for (guint i = 0; i < mesh->mats->len; i++) {
     struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
+    g_print("triangulating material %u of %u (%s)\n", i + 1, mesh->mats->len,
+            mat->name);
+
     guint num_tris = 0;
-    for (guint j = 0; j < mat->polys->num_indices; j++) {
-      guint poly_idx = mat->polys->indices[j];
+    for (guint j = 0; j < mat->polys->len; j++) {
+      guint poly_idx = mat->polys->data[j];
       struct poly_s *poly =
           &g_array_index(mesh->polys, struct poly_s, poly_idx);
       if (0 == poly->num_tris) {
@@ -234,17 +257,51 @@ void build_mesh(struct mesh_s *mesh) {
       }
       num_tris += poly->num_tris;
     }
-    mat->tris.num_tris = num_tris;
-    mat->tris.tris = g_new(struct tri_s, num_tris);
-    num_tris = 0;
-    for (guint j = 0; j < mat->polys->num_indices; j++) {
-      guint poly_idx = mat->polys->indices[j];
+    mat->tris = g_new(LISTOF(tri), 1);
+    LIST_INIT(mat->tris, num_tris);
+    for (guint j = 0; j < mat->polys->len; j++) {
+      guint poly_idx = mat->polys->data[j];
       struct poly_s *poly =
           &g_array_index(mesh->polys, struct poly_s, poly_idx);
       for (guint k = 0; k < poly->num_tris; k++) {
-        mat->tris.tris[num_tris++] = poly->tris[k];
+        LIST_APPEND(mat->tris, poly->tris[k]);
       }
     }
+  }
+  if (texinfos && num_texinfos > 0) {
+    const guint max_res = 256 + 128;
+    guint *tex_res = g_new(guint, max_res * max_res);
+    for (guint i = 0; i < max_res; i++) {
+      for (guint j = 0; j < max_res; j++) {
+        tex_res[i * max_res + j] = 0;
+      }
+    }
+    for (guint i = 0; i < num_texinfos; i++) {
+      const struct texinfo_s *texinfo = &texinfos[i];
+      g_print("texinfo[%u]: name='%s' size=%ux%u\n", i, texinfo->name,
+              texinfo->width, texinfo->height);
+      gint searches = 0;
+      struct mat_s *mat = find_mat(mesh->mats, texinfo->name, &searches);
+      if (mat) {
+        g_print(" * found matching material '%s' (after %d searches)\n",
+                mat->name, searches);
+        mat->width = texinfo->width;
+        mat->height = texinfo->height;
+        tex_res[mat->height * max_res + mat->width]++;
+      } else {
+        g_print(" * (ignored)\n");
+      }
+    }
+    // Print texture resolution histogram
+    for (guint i = 0; i < max_res; i++) {
+      for (guint j = 0; j < max_res; j++) {
+        if (tex_res[i * max_res + j] > 0) {
+          g_print("# of textures with resolution %u x %u: %u\n", j, i,
+                  tex_res[i * max_res + j]);
+        }
+      }
+    }
+    g_free(tex_res);
   }
 }
 
@@ -313,8 +370,8 @@ void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale) {
     g_string_append_printf(obj, "usemtl %s\n", mat->name);
 
     // Write faces
-    for (guint j = 0; j < mat->polys->num_indices; j++) {
-      guint poly_idx = mat->polys->indices[j];
+    for (guint j = 0; j < mat->polys->len; j++) {
+      guint poly_idx = mat->polys->data[j];
       struct poly_s *poly =
           &g_array_index(mesh->polys, struct poly_s, poly_idx);
       for (guint k = 0; k < poly->num_tris; k++) {
