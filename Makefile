@@ -19,12 +19,12 @@
 
 CFLAGS := -Wall -Wno-incompatible-pointer-types -O2 `pkg-config --cflags glib-2.0`
 LDFLAGS := `pkg-config --libs glib-2.0`
-
+CC := gcc
 
 all: bsp2obj
 
 # Include lodepng (lodepng.c is bundled in the repo)
-bsp2obj: bsp2obj.o lodepng.o vec.o mesh.o mygltf.o
+bsp2obj: bsp2obj.o lodepng.o vec.o mesh.o mygltf.o img.o
 	$(CC) $^ $(LDFLAGS) -o $@
 
 clean:
