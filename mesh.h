@@ -1,6 +1,7 @@
 #ifndef _MESH_
 #define _MESH_
 
+#include "img.h"
 #include "vec.h"
 #include <glib.h>
 
@@ -40,29 +41,6 @@
 
 LIST(guint, index);
 
-struct rgb_s {
-  union {
-    struct {
-      guint8 b;
-      guint8 g;
-      guint8 r;
-    };
-    guint8 rgb[3];
-  };
-};
-
-struct rgba_s {
-  union {
-    struct {
-      guint8 b;
-      guint8 g;
-      guint8 r;
-      guint8 a;
-    };
-    guint8 rgba[4];
-  };
-};
-
 struct vertex_s {
   struct vec3_s position;
   struct vec2_s uvs[2];
@@ -85,10 +63,27 @@ struct poly_s {
   guint *vertices; // array of guint (indices into mesh->vertices)
   guint num_tris;
   struct tri_s *tris;
+  guint lmap_x, lmap_y, lmap_w,
+      lmap_h; // width/height within the texture atlas, NOT the width/height of
+              // the texture atlas
+};
+
+struct poly_region_s {
+  gint x, y, w, h;
+};
+
+struct atlas_s {
+  guint width;
+  guint height;
+  struct rgba_s *data;
+  guint num_polys;
+  float avg_region_w, avg_region_h;
+  struct poly_region_s *poly_regions;
 };
 
 extern void poly_add_vertex(struct poly_s *poly, guint vertex_index);
-extern void init_poly(struct poly_s *poly, gint face_id);
+extern void init_poly(struct poly_s *poly, gint face_id, int lmap_x, int lmap_y,
+                      int lmap_w, int lmap_h);
 extern void triangulate_poly(struct poly_s *poly);
 extern void free_poly(struct poly_s *poly);
 
@@ -96,6 +91,7 @@ struct texinfo_s {
   gchar name[64];
   guint width;
   guint height;
+  struct rgba_s *data;
 };
 
 struct mat_s {
@@ -103,21 +99,25 @@ struct mat_s {
   LISTOF(index) * polys;
   LISTOF(tri) * tris;
   guint width, height;
+  struct rgba_s *texture_data;
+  struct rgba_s avg_color;
 };
 
 struct mesh_s {
   GHashTable
       *vertex_map; // key: struct vertex_s*, value: guint (index into vertices)
-  GHashTable *material_map; // key: struct mat_s*, value: guint (index into
-                            // mats)
-  GArray *vertices;         // array of struct vertex_s
-  GPtrArray *mats;          // array of struct mat_s
-  GArray *polys;            // array of struct poly_s
+  GHashTable *material_map;      // key: struct mat_s*, value: guint (index into
+                                 // mats)
+  GArray *vertices;              // array of struct vertex_s
+  GPtrArray *mats;               // array of struct mat_s
+  GArray *polys;                 // array of struct poly_s
+  struct atlas_s *texture_atlas; // texture atlas for lightmaps
 };
 
 extern void init_mesh(struct mesh_s *mesh);
 extern struct poly_s *mesh_add_poly(struct mesh_s *mesh,
-                                    const gchar *material_name);
+                                    const gchar *material_name, int lmap_x,
+                                    int lmap_y, int lmap_w, int lmap_h);
 extern guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
                                  struct vec2_s uv, struct vec2_s uv2);
 extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
@@ -126,5 +126,8 @@ extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
 extern void free_mesh(struct mesh_s **mesh);
 
 extern void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale);
+
+// TODO: sort by texture sizes for texture array material batching (minimize
+// texture switching)
 
 #endif // _MESH_

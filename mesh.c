@@ -87,12 +87,17 @@ void poly_add_vertex(struct poly_s *poly, guint vertex_index) {
   poly->vertices[poly->num_vertices++] = vertex_index;
 }
 
-void init_poly(struct poly_s *poly, gint face_id) {
+void init_poly(struct poly_s *poly, gint face_id, int lmap_x, int lmap_y,
+               int lmap_w, int lmap_h) {
   poly->face_id = face_id;
   poly->num_vertices = 0;
   poly->vertices = NULL;
   poly->num_tris = 0;
   poly->tris = NULL;
+  poly->lmap_x = lmap_x;
+  poly->lmap_y = lmap_y;
+  poly->lmap_w = lmap_w;
+  poly->lmap_h = lmap_h;
 }
 
 void triangulate_poly(struct poly_s *poly) {
@@ -148,6 +153,7 @@ void free_mat(struct mat_s *mat) {
   g_free(mat->polys);
   LIST_FREE(mat->tris);
   g_free(mat->tris);
+  g_free(mat->texture_data);
   mat->tris = NULL;
 }
 
@@ -161,6 +167,8 @@ struct mat_s *mesh_add_get_material(struct mesh_s *mesh,
   g_strlcpy(stored->name, material_name, sizeof(stored->name) - 1);
   stored->polys = g_new(LISTOF(index), 1);
   LIST_INIT(stored->polys, 16);
+  stored->texture_data = NULL;
+  stored->tris = NULL;
   g_hash_table_insert(mesh->material_map, g_strdup(material_name), stored);
   g_ptr_array_add(mesh->mats, stored);
   g_print("adding material '%s @ %u'\n", stored->name, mesh->mats->len - 1);
@@ -175,11 +183,13 @@ void init_mesh(struct mesh_s *mesh) {
   mesh->material_map =
       g_hash_table_new_full(g_str_hash, (GEqualFunc)g_str_equal, g_free, NULL);
   mesh->mats = g_ptr_array_new_with_free_func((GDestroyNotify)free_mat);
+  mesh->texture_atlas = g_new(struct atlas_s, 1);
 }
 
-struct poly_s *mesh_add_poly(struct mesh_s *mesh, const gchar *material_name) {
+struct poly_s *mesh_add_poly(struct mesh_s *mesh, const gchar *material_name,
+                             int lmap_x, int lmap_y, int lmap_w, int lmap_h) {
   struct poly_s poly;
-  init_poly(&poly, mesh->polys->len);
+  init_poly(&poly, mesh->polys->len, lmap_x, lmap_y, lmap_w, lmap_h);
   g_array_append_val(mesh->polys, poly);
   guint index = mesh->polys->len - 1;
   struct mat_s *mat = mesh_add_get_material(mesh, material_name);
@@ -242,11 +252,24 @@ static struct mat_s *find_mat(GPtrArray *sorted_mats, const gchar *name,
 void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
                 guint num_texinfos) {
   g_ptr_array_sort(mesh->mats, (GCompareFunc)mat_cmp_fn);
+
+  mesh->texture_atlas->num_polys = mesh->polys->len;
+  mesh->texture_atlas->poly_regions =
+      g_new(struct poly_region_s, mesh->texture_atlas->num_polys);
+  for (guint j = 0; j < mesh->polys->len; j++) {
+    struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, j);
+    mesh->texture_atlas->poly_regions[j] = (struct poly_region_s){
+        .x = poly->lmap_x,
+        .y = poly->lmap_y,
+        .w = poly->lmap_w,
+        .h = poly->lmap_h,
+    };
+  }
+
   for (guint i = 0; i < mesh->mats->len; i++) {
     struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
     g_print("triangulating material %u of %u (%s)\n", i + 1, mesh->mats->len,
             mat->name);
-
     guint num_tris = 0;
     for (guint j = 0; j < mat->polys->len; j++) {
       guint poly_idx = mat->polys->data[j];
@@ -257,6 +280,7 @@ void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
       }
       num_tris += poly->num_tris;
     }
+    g_print("# of triangle: %u\n", num_tris);
     mat->tris = g_new(LISTOF(tri), 1);
     LIST_INIT(mat->tris, num_tris);
     for (guint j = 0; j < mat->polys->len; j++) {
@@ -287,6 +311,27 @@ void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
                 mat->name, searches);
         mat->width = texinfo->width;
         mat->height = texinfo->height;
+        mat->texture_data =
+            g_memdup2(texinfo->data,
+                      texinfo->width * texinfo->height * sizeof(struct rgba_s));
+        guint r, g, b, a, count;
+        r = g = b = a = count = 0;
+        for (guint j = 0; j < texinfo->width * texinfo->height; j++) {
+          struct rgba_s *pixel = &mat->texture_data[j];
+          r += pixel->r;
+          g += pixel->g;
+          b += pixel->b;
+          a += pixel->a;
+          count++;
+        }
+        r /= count;
+        g /= count;
+        b /= count;
+        a /= count;
+        mat->avg_color.r = (guint8)CLAMP_COLOR_COMPONENT(r);
+        mat->avg_color.g = (guint8)CLAMP_COLOR_COMPONENT(g);
+        mat->avg_color.b = (guint8)CLAMP_COLOR_COMPONENT(b);
+        mat->avg_color.a = (guint8)CLAMP_COLOR_COMPONENT(a);
         tex_res[mat->height * max_res + mat->width]++;
       } else {
         g_print(" * (ignored)\n");
@@ -315,6 +360,9 @@ void free_mesh(struct mesh_s **mesh) {
   g_array_free((*mesh)->polys, TRUE);
   g_hash_table_destroy((*mesh)->material_map);
   g_ptr_array_free((*mesh)->mats, TRUE);
+  g_free((*mesh)->texture_atlas->data);
+  g_free((*mesh)->texture_atlas->poly_regions);
+  g_free((*mesh)->texture_atlas);
   g_free(*mesh);
   *mesh = NULL;
 }

@@ -484,36 +484,33 @@ int main(int argc, char **argv) {
 
     if (has_tex && mipheader->offsets[i] != -1) {
       gsize img_size = miptex->width * miptex->height;
-      guchar *img_data = g_new(guchar, img_size * 4);
+      struct texinfo_s *texinfo = &texinfos[num_texinfos++];
+      texinfo->data = g_new(struct rgba_s, img_size);
       g_print("Extracting texture '%s' (%ux%u) (offsets: %d, %d, %d, %d)\n",
               miptex->name, miptex->width, miptex->height, miptex->offset1,
               miptex->offset2, miptex->offset4, miptex->offset8);
 
       guchar *mip_data = (guchar *)buf + header->miptex.offset +
                          mipheader->offsets[i] + miptex->offset1;
-      g_strlcpy(texinfos[num_texinfos].name, miptex->name,
-                sizeof(texinfos->name) - 1);
-      texinfos[num_texinfos].width = miptex->width;
-      texinfos[num_texinfos].height = miptex->height;
-      num_texinfos++;
+      g_strlcpy(texinfo->name, miptex->name, sizeof(texinfo->name) - 1);
+      texinfo->width = miptex->width;
+      texinfo->height = miptex->height;
 
       for (gsize j = 0; j < img_size; j++) {
         struct rgb_s col = palette[mip_data[j]];
-
-        img_data[j * 4 + 0] = col.r;
-        img_data[j * 4 + 1] = col.g;
-        img_data[j * 4 + 2] = col.b;
-        img_data[j * 4 + 3] = 255;
+        texinfo->data[j].r = col.r;
+        texinfo->data[j].g = col.g;
+        texinfo->data[j].b = col.b;
+        texinfo->data[j].a = 255;
       }
       gchar *img_file = g_strdup_printf("export/textures/%s.png", miptex->name);
-      unsigned error = lodepng_encode32_file(img_file, img_data, miptex->width,
-                                             miptex->height);
+      unsigned error = lodepng_encode32_file(img_file, texinfo->data,
+                                             miptex->width, miptex->height);
       if (error) {
         g_error("error %u: %s\n", error, lodepng_error_text(error));
       }
 
       g_free(img_file);
-      g_free(img_data);
     }
   }
 
@@ -652,7 +649,7 @@ int main(int argc, char **argv) {
   }
 
   guint atlas_width = 512;
-  guint atlas_height = 512;
+  guint atlas_height = 768;
   pack_lmaps(lmaps, face_count, atlas_width, atlas_height);
   guint *lmap_lut = create_lmap_lut(lmaps, face_count);
   // Extract a single model containing lightmap UVs
@@ -667,7 +664,8 @@ int main(int argc, char **argv) {
         buf + header->miptex.offset + mipheader->offsets[surface->texture_id];
 
     struct lmap_s *lm = &lmaps[lmap_lut[face_id]];
-    struct poly_s *poly = mesh_add_poly(mesh, miptex->name);
+    struct poly_s *poly = mesh_add_poly(mesh, miptex->name, lm->atlas_x,
+                                        lm->atlas_y, lm->width, lm->height);
 
     for (gint j = 0; j < face->ledge_num; j++) {
       struct edge_s *edge = edges + ABS(edges_list[face->ledge_id + j]);
@@ -704,6 +702,9 @@ int main(int argc, char **argv) {
   g_free(buf);
   for (guint i = 0; i < face_count; i++) {
     g_free(lmaps[i].data);
+  }
+  for (guint i = 0; i < num_texinfos; i++) {
+    g_free(texinfos[i].data);
   }
   g_free(texinfos);
   g_free(lmaps);
