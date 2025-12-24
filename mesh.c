@@ -1,10 +1,13 @@
 #include "mesh.h"
+#include "lodepng.h"
 #include <math.h>
 
 #define VERTEX_CHUNK_SIZE 16
 #define INDEX_BUFFER_CHUNK_SIZE 16
 
 #define SCALE 10000.0f
+
+#define SQ(a) ((a) * (a))
 
 // quantize float to int
 static inline gint qf(gfloat x) { return (gint)lrintf(x * SCALE); }
@@ -87,17 +90,14 @@ void poly_add_vertex(struct poly_s *poly, guint vertex_index) {
   poly->vertices[poly->num_vertices++] = vertex_index;
 }
 
-void init_poly(struct poly_s *poly, gint face_id, int lmap_x, int lmap_y,
-               int lmap_w, int lmap_h) {
+void init_poly(struct poly_s *poly, gint face_id) {
   poly->face_id = face_id;
+  poly->plane_normal = vec3_set(0.0f, 0.0f, 0.0f);
+  poly->plane_dist = 0.0f;
   poly->num_vertices = 0;
   poly->vertices = NULL;
   poly->num_tris = 0;
   poly->tris = NULL;
-  poly->lmap_x = lmap_x;
-  poly->lmap_y = lmap_y;
-  poly->lmap_w = lmap_w;
-  poly->lmap_h = lmap_h;
 }
 
 void triangulate_poly(struct poly_s *poly) {
@@ -123,17 +123,28 @@ void free_poly(struct poly_s *poly) {
   poly->num_tris = 0;
 }
 
-/*
-guint material_hash_fn(gconstpointer key) {
-  const struct material_s *mat = key;
+struct vec3_s poly_region_coord_to_3d(struct poly_region_s *region,
+                                      struct ivec2_s co) {
+  gfloat u = ((gfloat)(co.x) + 0.5f) / (gfloat)(region->w);
+  gfloat v = ((gfloat)(co.y) + 0.5f) / (gfloat)(region->h);
 
-  // Defensive: allow NULL names (hash to 0)
-  if (!mat || !mat->name || !mat->name->str)
-    return 0;
-
-  return g_str_hash(mat->name->str);
+  gfloat S = region->scale.x * u + region->bias.x;
+  gfloat T = region->scale.y * v + region->bias.y;
+  struct vec3_s s = vec3_mul(region->s_axis, S);
+  struct vec3_s t = vec3_mul(region->t_axis, T);
+  return vec3_add(vec3_add(region->o, s), t);
 }
-*/
+
+struct ivec2_s poly_region_coord_from_3d(struct poly_region_s *region,
+                                         struct vec3_s p) {
+  struct vec3_s v = vec3_sub(p, region->o);
+  gfloat S = vec3_dot(v, region->s_axis);
+  gfloat T = vec3_dot(v, region->t_axis);
+  float U = (S - region->bias.x) / region->scale.x;
+  float V = (T - region->bias.y) / region->scale.y;
+  return (struct ivec2_s){(gint)(U * region->w - 0.5f),
+                          (gint)(V * region->h - 0.5f)};
+}
 
 gint mat_cmp_fn(gconstpointer a, gconstpointer b) {
   const struct mat_s *ma = *(const struct mat_s *const *)a;
@@ -186,10 +197,9 @@ void init_mesh(struct mesh_s *mesh) {
   mesh->texture_atlas = g_new(struct atlas_s, 1);
 }
 
-struct poly_s *mesh_add_poly(struct mesh_s *mesh, const gchar *material_name,
-                             int lmap_x, int lmap_y, int lmap_w, int lmap_h) {
+struct poly_s *mesh_add_poly(struct mesh_s *mesh, const gchar *material_name) {
   struct poly_s poly;
-  init_poly(&poly, mesh->polys->len, lmap_x, lmap_y, lmap_w, lmap_h);
+  init_poly(&poly, mesh->polys->len);
   g_array_append_val(mesh->polys, poly);
   guint index = mesh->polys->len - 1;
   struct mat_s *mat = mesh_add_get_material(mesh, material_name);
@@ -250,21 +260,12 @@ static struct mat_s *find_mat(GPtrArray *sorted_mats, const gchar *name,
 }
 
 void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
-                guint num_texinfos) {
+                guint num_texinfos, guint atlas_width, guint atlas_height) {
+  // Create texture atlas
   g_ptr_array_sort(mesh->mats, (GCompareFunc)mat_cmp_fn);
 
-  mesh->texture_atlas->num_polys = mesh->polys->len;
-  mesh->texture_atlas->poly_regions =
-      g_new(struct poly_region_s, mesh->texture_atlas->num_polys);
-  for (guint j = 0; j < mesh->polys->len; j++) {
-    struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, j);
-    mesh->texture_atlas->poly_regions[j] = (struct poly_region_s){
-        .x = poly->lmap_x,
-        .y = poly->lmap_y,
-        .w = poly->lmap_w,
-        .h = poly->lmap_h,
-    };
-  }
+  mesh->texture_atlas->width = atlas_width;
+  mesh->texture_atlas->height = atlas_height;
 
   for (guint i = 0; i < mesh->mats->len; i++) {
     struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
@@ -314,25 +315,52 @@ void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
         mat->texture_data =
             g_memdup2(texinfo->data,
                       texinfo->width * texinfo->height * sizeof(struct rgba_s));
-        guint r, g, b, a, count;
-        r = g = b = a = count = 0;
-        for (guint j = 0; j < texinfo->width * texinfo->height; j++) {
+        guint count;
+        double r, g, b, a;
+        guint minr = 255, ming = 255, minb = 255;
+        guint maxr = 0, maxg = 0, maxb = 0;
+        r = g = b = a = 0.0;
+        count = 0;
+        for (guint j = 0; j < mat->width * mat->height; j++) {
           struct rgba_s *pixel = &mat->texture_data[j];
-          r += pixel->r;
-          g += pixel->g;
-          b += pixel->b;
-          a += pixel->a;
+          r += SQ((double)pixel->r / 255.0);
+          g += SQ((double)pixel->g / 255.0);
+          b += SQ((double)pixel->b / 255.0);
+          a += SQ((double)pixel->a / 255.0);
           count++;
+
+          if (pixel->r < minr)
+            minr = pixel->r;
+          if (pixel->r > maxr)
+            maxr = pixel->r;
+          if (pixel->g < ming)
+            ming = pixel->g;
+          if (pixel->g > maxg)
+            maxg = pixel->g;
+          if (pixel->b < minb)
+            minb = pixel->b;
+          if (pixel->b > maxb)
+            maxb = pixel->b;
         }
-        r /= count;
-        g /= count;
-        b /= count;
-        a /= count;
+        r /= (double)count;
+        g /= (double)count;
+        b /= (double)count;
+        a /= (double)count;
+        r = sqrt(r) * 255.0;
+        g = sqrt(g) * 255.0;
+        b = sqrt(b) * 255.0;
+        a = sqrt(a) * 255.0;
         mat->avg_color.r = (guint8)CLAMP_COLOR_COMPONENT(r);
         mat->avg_color.g = (guint8)CLAMP_COLOR_COMPONENT(g);
         mat->avg_color.b = (guint8)CLAMP_COLOR_COMPONENT(b);
         mat->avg_color.a = (guint8)CLAMP_COLOR_COMPONENT(a);
+
+        g_print("   avg color: R=%u G=%u B=%u A=%u\n", mat->avg_color.r,
+                mat->avg_color.g, mat->avg_color.b, mat->avg_color.a);
+        g_print("   min color: R=%u G=%u B=%u\n", minr, ming, minb);
+        g_print("   max color: R=%u G=%u B=%u\n", maxr, maxg, maxb);
         tex_res[mat->height * max_res + mat->width]++;
+
       } else {
         g_print(" * (ignored)\n");
       }
@@ -360,7 +388,9 @@ void free_mesh(struct mesh_s **mesh) {
   g_array_free((*mesh)->polys, TRUE);
   g_hash_table_destroy((*mesh)->material_map);
   g_ptr_array_free((*mesh)->mats, TRUE);
-  g_free((*mesh)->texture_atlas->data);
+  g_free((*mesh)->texture_atlas->diffuse_data);
+  g_free((*mesh)->texture_atlas->normal_data);
+  g_free((*mesh)->texture_atlas->position_data);
   g_free((*mesh)->texture_atlas->poly_regions);
   g_free((*mesh)->texture_atlas);
   g_free(*mesh);
@@ -434,4 +464,56 @@ void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale) {
   }
   g_file_set_contents("mesh.obj", obj->str, obj->len, NULL);
   g_string_free(obj, TRUE);
+}
+
+void create_mesh_g_buffer(struct mesh_s *mesh) {
+  struct atlas_s *atlas = mesh->texture_atlas;
+  atlas->diffuse_data = g_new(struct rgba_s, atlas->width * atlas->height);
+  atlas->normal_data = g_new(struct vec3_s, atlas->width * atlas->height);
+  atlas->position_data = g_new(struct vec3_s, atlas->width * atlas->height);
+
+  g_print("creating g-buffer atlas %ux%u...\n", atlas->width, atlas->height);
+  for (guint i = 0; i < atlas->width * atlas->height; i++) {
+    atlas->diffuse_data[i] = (struct rgba_s){{{0, 0, 0, 255}}};
+    atlas->normal_data[i] = vec3_set(0.0f, 0.0f, 1.0f);
+    atlas->position_data[i] = vec3_set(0.0f, 0.0f, 0.0f);
+  }
+
+  struct rgba_s *poly_colors = g_new(struct rgba_s, mesh->polys->len);
+  for (guint i = 0; i < mesh->mats->len; i++) {
+    struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
+    for (guint j = 0; j < mat->polys->len; j++) {
+      guint poly_idx = mat->polys->data[j];
+      poly_colors[poly_idx] = mat->avg_color;
+    }
+  }
+
+  for (guint i = 0; i < mesh->polys->len; i++) {
+    struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, i);
+    struct poly_region_s *region = &atlas->poly_regions[i];
+    for (gint y = 0; y < region->h; y++) {
+      for (gint x = 0; x < region->w; x++) {
+        gint dst_x = region->x + x;
+        gint dst_y = region->y + y;
+        // if (dst_x >= (gint)atlas->width || dst_y >= (gint)atlas->height) {
+        //   g_print("skipping oob pixel at (%d, %d) for poly %u\n", dst_x,
+        //   dst_y,
+        //           i);
+        //   continue;
+        // }
+        guint dst_idx = dst_y * atlas->width + dst_x;
+        atlas->diffuse_data[dst_idx] = poly_colors[i];
+        atlas->normal_data[dst_idx] = poly->plane_normal;
+        atlas->position_data[dst_idx] =
+            poly_region_coord_to_3d(region, (struct ivec2_s){x, y});
+      }
+    }
+  }
+  unsigned error = lodepng_encode32_file("diffuse.png", atlas->diffuse_data,
+                                         atlas->width, atlas->height);
+  if (error) {
+    g_error("error %u: %s\n", error, lodepng_error_text(error));
+  }
+
+  g_free(poly_colors);
 }

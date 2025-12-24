@@ -59,33 +59,38 @@ LIST(struct tri_s, tri);
 
 struct poly_s {
   gint face_id;
+  struct vec3_s plane_normal;
+  gfloat plane_dist;
   guint num_vertices;
   guint *vertices; // array of guint (indices into mesh->vertices)
   guint num_tris;
   struct tri_s *tris;
-  guint lmap_x, lmap_y, lmap_w,
-      lmap_h; // width/height within the texture atlas, NOT the width/height of
-              // the texture atlas
 };
 
 struct poly_region_s {
   gint x, y, w, h;
+  struct vec3_s o, s_axis, t_axis;
+  struct vec2_s scale, bias;
 };
 
 struct atlas_s {
   guint width;
   guint height;
-  struct rgba_s *data;
+  struct rgba_s *diffuse_data;
+  struct vec3_s *normal_data;
+  struct vec3_s *position_data;
   guint num_polys;
-  float avg_region_w, avg_region_h;
   struct poly_region_s *poly_regions;
 };
 
+struct vec3_s poly_region_coord_to_3d(struct poly_region_s *region,
+                                      struct ivec2_s co);
+
+struct ivec2_s poly_region_coord_from_3d(struct poly_region_s *region,
+                                         struct vec3_s p);
+
 extern void poly_add_vertex(struct poly_s *poly, guint vertex_index);
-extern void init_poly(struct poly_s *poly, gint face_id, int lmap_x, int lmap_y,
-                      int lmap_w, int lmap_h);
 extern void triangulate_poly(struct poly_s *poly);
-extern void free_poly(struct poly_s *poly);
 
 struct texinfo_s {
   gchar name[64];
@@ -116,16 +121,18 @@ struct mesh_s {
 
 extern void init_mesh(struct mesh_s *mesh);
 extern struct poly_s *mesh_add_poly(struct mesh_s *mesh,
-                                    const gchar *material_name, int lmap_x,
-                                    int lmap_y, int lmap_w, int lmap_h);
+                                    const gchar *material_name);
 extern guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
                                  struct vec2_s uv, struct vec2_s uv2);
 extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
-                       guint num_texinfos);
+                       guint num_texinfos, guint atlas_width,
+                       guint atlas_height);
 
 extern void free_mesh(struct mesh_s **mesh);
 
 extern void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale);
+
+extern void create_mesh_g_buffer(struct mesh_s *mesh);
 
 // TODO: sort by texture sizes for texture array material batching (minimize
 // texture switching)

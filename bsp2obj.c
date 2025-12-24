@@ -56,6 +56,23 @@ struct header_s {
   struct entry_s models;
 };
 
+struct plane_s {
+  struct vec3_s normal; // Vector orthogonal to plane (Nx,Ny,Nz)
+                        // with Nx2+Ny2+Nz2 = 1
+  gfloat dist;          // Offset to plane, along the normal vector.
+                        // Distance from (0,0,0) to the plane
+  gint type;            // Type of plane, depending on normal vector.
+};
+
+/*
+plane types:
+0: Axial plane, in X
+1: Axial plane, in Y
+2: Axial plane, in Z
+3: Non axial plane, roughly toward X
+4: Non axial plane, roughly toward Y
+5: Non axial plane, roughly toward Z*/
+
 struct boundbox_s {
   struct vec3_s min;
   struct vec3_s max;
@@ -132,11 +149,6 @@ void lmap_addST(struct lmap_s *lm, gfloat s, gfloat t);
 void calc_lmap(struct lmap_s *lm);
 void lmap_getUV(struct lmap_s *lm, gfloat s, gfloat t, gfloat *u, gfloat *v);
 int compare_lmap_fn(const gpointer a, const gpointer b);
-
-struct ivec2_s {
-  gint x;
-  gint y;
-};
 
 struct ivec2_s pack_lmap_block(guint *skyline, guint atlas_width, guint width,
                                guint height, gboolean padded) {
@@ -241,6 +253,42 @@ guint *create_lmap_lut(const struct lmap_s *lmaps, guint num_lmaps) {
     lut[lmaps[i].face_id] = i;
   }
   return lut;
+}
+
+gboolean build_region(struct poly_region_s *region, const struct poly_s *poly,
+                      const struct lmap_s *lm, struct vec3_s surface_vectorS,
+                      gfloat surface_distS, struct vec3_s surface_vectorT,
+                      gfloat surface_distT) {
+  region->x = lm->atlas_x;
+  region->y = lm->atlas_y;
+  region->w = lm->width;
+  region->h = lm->height;
+
+  // Lightmap S/T mapping constants (Quake scale = 16)
+  region->scale.x = (gfloat)region->w * 16.0f;
+  region->scale.y = (gfloat)region->h * 16.0f;
+  region->bias.x = (gfloat)lm->tmins[0];
+  region->bias.y = (gfloat)lm->tmins[1];
+
+  struct vec3_s t_x_n = vec3_cross(surface_vectorT, poly->plane_normal);
+  gfloat det = vec3_dot(surface_vectorS, t_x_n);
+  if (fabsf(det) < 1e-8f)
+    return FALSE;
+  gfloat inv_det = 1.0f / det;
+  region->s_axis = vec3_mul(t_x_n, inv_det); // (Vt x N)/det
+  region->t_axis = vec3_mul(vec3_cross(poly->plane_normal, surface_vectorS),
+                            inv_det); // (N x Vs)/det
+
+  // n_dual and plane_normal should be aligned
+  struct vec3_s n_dual = vec3_mul(vec3_cross(surface_vectorS, surface_vectorT),
+                                  inv_det); // (Vs x Vt)/det
+
+  struct vec3_s u = vec3_mul(region->s_axis, -surface_distS);
+  struct vec3_s v = vec3_mul(region->t_axis, -surface_distT);
+  struct vec3_s w = vec3_mul(n_dual, poly->plane_dist);
+
+  region->o = vec3_add(vec3_add(u, v), w);
+  return TRUE;
 }
 
 void export_mesh_with_lmap_to_obj(struct mesh_s *mesh, gfloat scale) {
@@ -446,6 +494,7 @@ int main(int argc, char **argv) {
   }
 
   struct header_s *header = buf;
+  struct plane_s *planes = buf + header->planes.offset;
   struct model_s *models = buf + header->models.offset;
   struct mipheader_s *mipheader = buf + header->miptex.offset;
   struct vec3_s *vertices = buf + header->vertices.offset;
@@ -498,9 +547,9 @@ int main(int argc, char **argv) {
 
       for (gsize j = 0; j < img_size; j++) {
         struct rgb_s col = palette[mip_data[j]];
-        texinfo->data[j].r = col.r;
+        texinfo->data[j].r = col.b;
         texinfo->data[j].g = col.g;
-        texinfo->data[j].b = col.b;
+        texinfo->data[j].b = col.r;
         texinfo->data[j].a = 255;
       }
       gchar *img_file = g_strdup_printf("export/textures/%s.png", miptex->name);
@@ -656,6 +705,10 @@ int main(int argc, char **argv) {
   struct model_s *model = &models[0];
   struct mesh_s *mesh = g_new(struct mesh_s, 1);
   init_mesh(mesh);
+  mesh->texture_atlas->num_polys = model->face_num;
+  mesh->texture_atlas->poly_regions =
+      g_new(struct poly_region_s, mesh->texture_atlas->num_polys);
+
   for (gint i = 0; i < model->face_num; i++) {
     gint face_id = model->face_id + i;
     struct face_s *face = &faces[face_id];
@@ -664,14 +717,17 @@ int main(int argc, char **argv) {
         buf + header->miptex.offset + mipheader->offsets[surface->texture_id];
 
     struct lmap_s *lm = &lmaps[lmap_lut[face_id]];
-    struct poly_s *poly = mesh_add_poly(mesh, miptex->name, lm->atlas_x,
-                                        lm->atlas_y, lm->width, lm->height);
-
+    struct poly_s *poly = mesh_add_poly(mesh, miptex->name);
+    struct plane_s *plane = &planes[face->plane_id];
+    poly->plane_normal = plane->normal;
     for (gint j = 0; j < face->ledge_num; j++) {
       struct edge_s *edge = edges + ABS(edges_list[face->ledge_id + j]);
       gint vtx =
           edges_list[face->ledge_id + j] < 0 ? edge->vertex1 : edge->vertex0;
       struct vec3_s position = vertices[vtx];
+      if (0 == j) {
+        poly->plane_dist = vec3_dot(poly->plane_normal, position);
+      }
       struct vec2_s st, uv;
       st.x = vec3_dot(surface->vectorS, position) + surface->distS;
       st.y = vec3_dot(surface->vectorT, position) + surface->distT;
@@ -684,18 +740,26 @@ int main(int argc, char **argv) {
       poly_add_vertex(poly, vertex_idx);
     }
     triangulate_poly(poly);
+    build_region(&mesh->texture_atlas->poly_regions[i], poly, lm,
+                 surface->vectorS, surface->distS, surface->vectorT,
+                 surface->distT);
   }
   // build_mesh(mesh, texinfos, num_texinfos);
   g_print("# of tex infos: %u\n", num_texinfos);
-  build_mesh(mesh, texinfos, num_texinfos);
+  build_mesh(mesh, texinfos, num_texinfos, atlas_width, atlas_height);
   g_print("mesh built. exporting...\n");
   export_mesh_with_lmap_to_obj(mesh, 0.025f);
+  g_print("lightmap OBJ exported.\n");
   export_mesh_with_mats_to_obj(mesh, 0.025f);
+  g_print("material OBJ exported.\n");
   export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
+  g_print("GLTF exported.\n");
   if (err != NULL) {
     g_error("%s", err->message);
     g_error_free(err);
   }
+  g_print("Differed Lighting G-Buffer created.\n");
+  create_mesh_g_buffer(mesh);
 
   g_hash_table_unref(map);
   g_string_free(obj, TRUE);
