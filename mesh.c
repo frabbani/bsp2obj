@@ -123,7 +123,20 @@ void free_poly(struct poly_s *poly) {
   poly->num_tris = 0;
 }
 
-struct vec3_s poly_region_coord_to_3d(struct poly_region_s *region,
+static void rotate_poly(struct poly_s *poly,
+                        const struct mat3_s rotation_matrix) {
+  // vertices are already rotated, rotate the plane normal
+  poly->plane_normal = vec3_transf(rotation_matrix, poly->plane_normal);
+}
+
+static void rotate_poly_region(struct poly_region_s *region,
+                               const struct mat3_s rotation_matrix) {
+  region->o = vec3_transf(rotation_matrix, region->o);
+  region->s_axis = vec3_transf(rotation_matrix, region->s_axis);
+  region->t_axis = vec3_transf(rotation_matrix, region->t_axis);
+}
+
+struct vec3_s poly_region_coord_to_3d(const struct poly_region_s *region,
                                       struct ivec2_s co) {
   gfloat u = ((gfloat)(co.x) + 0.5f) / (gfloat)(region->w);
   gfloat v = ((gfloat)(co.y) + 0.5f) / (gfloat)(region->h);
@@ -135,7 +148,7 @@ struct vec3_s poly_region_coord_to_3d(struct poly_region_s *region,
   return vec3_add(vec3_add(region->o, s), t);
 }
 
-struct ivec2_s poly_region_coord_from_3d(struct poly_region_s *region,
+struct ivec2_s poly_region_coord_from_3d(const struct poly_region_s *region,
                                          struct vec3_s p) {
   struct vec3_s v = vec3_sub(p, region->o);
   gfloat S = vec3_dot(v, region->s_axis);
@@ -260,12 +273,27 @@ static struct mat_s *find_mat(GPtrArray *sorted_mats, const gchar *name,
 }
 
 void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
-                guint num_texinfos, guint atlas_width, guint atlas_height) {
+                guint num_texinfos, guint atlas_width, guint atlas_height,
+                struct vec3_s rotate) {
   // Create texture atlas
   g_ptr_array_sort(mesh->mats, (GCompareFunc)mat_cmp_fn);
 
   mesh->texture_atlas->width = atlas_width;
   mesh->texture_atlas->height = atlas_height;
+
+  // struct mat3_s rotation_matrix = mat3_rot(rotate);
+  // for (guint i = 0; i < mesh->vertices->len; i++) {
+  //   struct vertex_s *v = &g_array_index(mesh->vertices, struct vertex_s, i);
+  //   v->position = vec3_transf(rotation_matrix, v->position);
+  // }
+  // for (guint i = 0; i < mesh->polys->len; i++) {
+  //   struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, i);
+  //   rotate_poly(poly, rotation_matrix);
+  // }
+  // for (guint i = 0; i < mesh->texture_atlas->num_polys; i++) {
+  //   rotate_poly_region(&mesh->texture_atlas->poly_regions[i],
+  //   rotation_matrix);
+  // }
 
   for (guint i = 0; i < mesh->mats->len; i++) {
     struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
@@ -508,6 +536,28 @@ void create_mesh_g_buffer(struct mesh_s *mesh) {
             poly_region_coord_to_3d(region, (struct ivec2_s){x, y});
       }
     }
+  }
+
+  struct vec3_s lightpos = vec3_set(0.0f, 0.0f, 0.0f);
+  for (guint i = 0; i < atlas->width * atlas->height; i++) {
+    struct vec3_s pos = atlas->position_data[i];
+    struct vec3_s normal = vec3_norm(atlas->normal_data[i]);
+    // gfloat diff = MAX(vec3_dot(normal, lightdir), 0.0f);
+    struct vec3_s lightdir = vec3_sub(lightpos, pos);
+    float len_sq = vec3_dot(lightdir, lightdir);
+    float len = sqrtf(len_sq);
+    lightdir = vec3_mul(lightdir, 1.0f / len);
+    gfloat ambient = 0.1f;
+    gfloat diff = MAX(vec3_dot(normal, lightdir), 0.0f);
+    gfloat intensity = 255.0f / len; // diff / (0.1f * len_sq); // +
+    // ambient;
+    intensity = sqrtf(CLAMP(intensity, 0.0f, 1.0f));
+    atlas->diffuse_data[i].r =
+        (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].r * intensity);
+    atlas->diffuse_data[i].g =
+        (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].g * intensity);
+    atlas->diffuse_data[i].b =
+        (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].b * intensity);
   }
   unsigned error = lodepng_encode32_file("diffuse.png", atlas->diffuse_data,
                                          atlas->width, atlas->height);

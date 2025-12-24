@@ -83,10 +83,10 @@ struct atlas_s {
   struct poly_region_s *poly_regions;
 };
 
-struct vec3_s poly_region_coord_to_3d(struct poly_region_s *region,
+struct vec3_s poly_region_coord_to_3d(const struct poly_region_s *region,
                                       struct ivec2_s co);
 
-struct ivec2_s poly_region_coord_from_3d(struct poly_region_s *region,
+struct ivec2_s poly_region_coord_from_3d(const struct poly_region_s *region,
                                          struct vec3_s p);
 
 extern void poly_add_vertex(struct poly_s *poly, guint vertex_index);
@@ -126,7 +126,7 @@ extern guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
                                  struct vec2_s uv, struct vec2_s uv2);
 extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
                        guint num_texinfos, guint atlas_width,
-                       guint atlas_height);
+                       guint atlas_height, struct vec3_s rotate);
 
 extern void free_mesh(struct mesh_s **mesh);
 

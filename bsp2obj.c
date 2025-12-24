@@ -311,7 +311,7 @@ void export_mesh_with_lmap_to_obj(struct mesh_s *mesh, gfloat scale) {
   g_string_append(obj, "Tr 1\n");
   g_string_append(obj, "illum 1\n");
   g_string_append(obj, "Ns 0\n");
-  g_string_append(obj, "map_Kd lightmap.png\n");
+  g_string_append(obj, "map_Kd diffuse.png\n");
   g_file_set_contents("lightmap.mtl", obj->str, obj->len, NULL);
 
   g_string_free(obj, TRUE);
@@ -715,11 +715,16 @@ int main(int argc, char **argv) {
     struct surface_s *surface = &surfaces[face->texinfo_id];
     struct miptex_s *miptex =
         buf + header->miptex.offset + mipheader->offsets[surface->texture_id];
-
+    // if (g_strrstr_len(miptex->name, -1, "sky")) {
+    //   continue;
+    // }
     struct lmap_s *lm = &lmaps[lmap_lut[face_id]];
     struct poly_s *poly = mesh_add_poly(mesh, miptex->name);
     struct plane_s *plane = &planes[face->plane_id];
     poly->plane_normal = plane->normal;
+    if (face->side) {
+      poly->plane_normal = vec3_mul(poly->plane_normal, -1.0f);
+    }
     for (gint j = 0; j < face->ledge_num; j++) {
       struct edge_s *edge = edges + ABS(edges_list[face->ledge_id + j]);
       gint vtx =
@@ -744,9 +749,12 @@ int main(int argc, char **argv) {
                  surface->vectorS, surface->distS, surface->vectorT,
                  surface->distT);
   }
+
   // build_mesh(mesh, texinfos, num_texinfos);
   g_print("# of tex infos: %u\n", num_texinfos);
-  build_mesh(mesh, texinfos, num_texinfos, atlas_width, atlas_height);
+  build_mesh(mesh, texinfos, num_texinfos, atlas_width, atlas_height,
+             vec3_set(DEG2RAD(-90), 0.0f, 0.0f));
+
   g_print("mesh built. exporting...\n");
   export_mesh_with_lmap_to_obj(mesh, 0.025f);
   g_print("lightmap OBJ exported.\n");
@@ -758,8 +766,8 @@ int main(int argc, char **argv) {
     g_error("%s", err->message);
     g_error_free(err);
   }
-  g_print("Differed Lighting G-Buffer created.\n");
   create_mesh_g_buffer(mesh);
+  g_print("deferred lighting g-buffer created.\n");
 
   g_hash_table_unref(map);
   g_string_free(obj, TRUE);
