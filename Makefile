@@ -18,13 +18,16 @@
 #
 
 CFLAGS := -Wall -Wno-incompatible-pointer-types -O2 `pkg-config --cflags glib-2.0`
-LDFLAGS := `pkg-config --libs glib-2.0`
+# Link against local libgrid_trace if present. Adds current directory to library
+# search path. If you prefer an explicit path, replace
+# -L. with -L/path/to/lib or put the .so filename directly on the link line.
+LDFLAGS := `pkg-config --libs glib-2.0` -L. -lgrid_trace
 CC := gcc
 
 all: bsp2obj
 
 # Include lodepng (lodepng.c is bundled in the repo)
-bsp2obj: bsp2obj.o lodepng.o vec.o mesh.o mygltf.o img.o
+bsp2obj: bsp2obj.o lodepng.o mesh.o mygltf.o img.o clock.o
 	$(CC) $^ $(LDFLAGS) -o $@
 
 clean:

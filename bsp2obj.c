@@ -21,16 +21,10 @@
 #include <math.h>
 #include <string.h>
 
+#include "grid_trace.h"
 #include "lodepng.h"
 #include "mesh.h"
 #include "mygltf.h"
-
-#define SWAP(a, b)                                                             \
-  do {                                                                         \
-    typeof(a) tmp = a;                                                         \
-    a = b;                                                                     \
-    b = tmp;                                                                   \
-  } while (0)
 
 struct entry_s {
   guint32 offset;
@@ -752,8 +746,7 @@ int main(int argc, char **argv) {
 
   // build_mesh(mesh, texinfos, num_texinfos);
   g_print("# of tex infos: %u\n", num_texinfos);
-  build_mesh(mesh, texinfos, num_texinfos, atlas_width, atlas_height,
-             vec3_set(DEG2RAD(-90), 0.0f, 0.0f));
+  build_mesh(mesh, texinfos, num_texinfos, atlas_width, atlas_height);
 
   g_print("mesh built. exporting...\n");
   export_mesh_with_lmap_to_obj(mesh, 0.025f);

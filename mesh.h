@@ -1,9 +1,10 @@
 #ifndef _MESH_
 #define _MESH_
 
+#include "grid_trace.h"
 #include "img.h"
-#include "vec.h"
 #include <glib.h>
+
 
 #define LIST(type, name)                                                       \
   struct name##list_s {                                                        \
@@ -76,6 +77,8 @@ struct poly_region_s {
 struct atlas_s {
   guint width;
   guint height;
+  struct mat3_s basis;
+  guint *id_data;
   struct rgba_s *diffuse_data;
   struct vec3_s *normal_data;
   struct vec3_s *position_data;
@@ -126,7 +129,7 @@ extern guint mesh_add_get_vertex(struct mesh_s *mesh, struct vec3_s position,
                                  struct vec2_s uv, struct vec2_s uv2);
 extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
                        guint num_texinfos, guint atlas_width,
-                       guint atlas_height, struct vec3_s rotate);
+                       guint atlas_height);
 
 extern void free_mesh(struct mesh_s **mesh);
 
@@ -134,7 +137,72 @@ extern void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale);
 
 extern void create_mesh_g_buffer(struct mesh_s *mesh);
 
-// TODO: sort by texture sizes for texture array material batching (minimize
-// texture switching)
+struct ray_s {
+  struct vec3_s o;
+  struct vec3_s d;
+};
+
+extern void ray_ortho_decomp(const struct ray_s *ray, struct vec3_s p,
+                             struct vec3_s *v_par, struct vec3_s *v_perp);
+
+gboolean ray_sphere_touch(const struct ray_s *ray, const struct vec3_s origin,
+                          gfloat radius);
+
+struct collider_s {
+  guint poly_id;
+  struct vec3_s face_normal;
+  gfloat face_dist;
+  struct vec3_s centroid;
+  gfloat radius;
+  guint edge_count;
+  struct vec3_s *edge_normals;
+  gfloat *edge_dists;
+  struct vec3_s *ps;
+};
+
+struct collision_partition_s {
+  struct vec3_s min;
+  struct vec3_s max;
+  struct vec3_s origin;
+  gfloat radius;
+  LISTOF(index) * colliders;
+};
+
+struct collision_partitions_8x8x8_s {
+  struct vec3_s min;
+  struct vec3_s max;
+  struct vec3_s origin;
+  struct collision_partition_s cells[8][8][8];
+};
+
+struct collision_partitions_8x8x8_sweeper_s {
+  const struct collider_s *colliders;
+  guint num_colliders;
+  guint test_val;
+  guint *test_masks;
+  LISTOF(index) * test_indices;
+};
+
+extern void init_collider(struct collider_s *collider,
+                          const struct poly_s *poly, const GArray *vertices);
+extern gboolean sweep_collision(const struct collider_s *collider,
+                                struct vec3_s p0, struct vec3_s p1,
+                                struct vec3_s *hit_p);
+extern void free_collider(struct collider_s *collider);
+
+extern void export_colliders_to_obj(const struct collider_s *collider,
+                                    guint num_colliders, const gchar *filename);
+
+extern void
+create_collision_partitions(struct collision_partitions_8x8x8_s *partitions,
+                            struct collider_s *colliders, guint num_colliders);
+
+extern void
+free_collision_partitions(struct collision_partitions_8x8x8_s *partitions);
+
+extern gboolean
+sweep_collision_partitions(struct collision_partitions_8x8x8_s *partitions,
+                           struct collision_partitions_8x8x8_sweeper_s *sweeper,
+                           struct vec3_s p0, struct vec3_s p1, guint ignore_id);
 
 #endif // _MESH_

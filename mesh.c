@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include "clock.h"
 #include "lodepng.h"
 #include <math.h>
 
@@ -6,8 +7,6 @@
 #define INDEX_BUFFER_CHUNK_SIZE 16
 
 #define SCALE 10000.0f
-
-#define SQ(a) ((a) * (a))
 
 // quantize float to int
 static inline gint qf(gfloat x) { return (gint)lrintf(x * SCALE); }
@@ -212,12 +211,12 @@ void init_mesh(struct mesh_s *mesh) {
 
 struct poly_s *mesh_add_poly(struct mesh_s *mesh, const gchar *material_name) {
   struct poly_s poly;
-  init_poly(&poly, mesh->polys->len);
+  guint face_id = mesh->polys->len;
+  init_poly(&poly, face_id);
   g_array_append_val(mesh->polys, poly);
-  guint index = mesh->polys->len - 1;
   struct mat_s *mat = mesh_add_get_material(mesh, material_name);
-  LIST_APPEND(mat->polys, index);
-  return &g_array_index(mesh->polys, struct poly_s, mesh->polys->len - 1);
+  LIST_APPEND(mat->polys, face_id);
+  return &g_array_index(mesh->polys, struct poly_s, face_id);
 }
 
 // IMPORTANT: Vertices with lightmap UVs will not dedup because lightmap UVs
@@ -273,27 +272,13 @@ static struct mat_s *find_mat(GPtrArray *sorted_mats, const gchar *name,
 }
 
 void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
-                guint num_texinfos, guint atlas_width, guint atlas_height,
-                struct vec3_s rotate) {
+                guint num_texinfos, guint atlas_width, guint atlas_height) {
   // Create texture atlas
   g_ptr_array_sort(mesh->mats, (GCompareFunc)mat_cmp_fn);
 
   mesh->texture_atlas->width = atlas_width;
   mesh->texture_atlas->height = atlas_height;
-
-  // struct mat3_s rotation_matrix = mat3_rot(rotate);
-  // for (guint i = 0; i < mesh->vertices->len; i++) {
-  //   struct vertex_s *v = &g_array_index(mesh->vertices, struct vertex_s, i);
-  //   v->position = vec3_transf(rotation_matrix, v->position);
-  // }
-  // for (guint i = 0; i < mesh->polys->len; i++) {
-  //   struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, i);
-  //   rotate_poly(poly, rotation_matrix);
-  // }
-  // for (guint i = 0; i < mesh->texture_atlas->num_polys; i++) {
-  //   rotate_poly_region(&mesh->texture_atlas->poly_regions[i],
-  //   rotation_matrix);
-  // }
+  mesh->texture_atlas->basis = mat3_ident();
 
   for (guint i = 0; i < mesh->mats->len; i++) {
     struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
@@ -416,6 +401,7 @@ void free_mesh(struct mesh_s **mesh) {
   g_array_free((*mesh)->polys, TRUE);
   g_hash_table_destroy((*mesh)->material_map);
   g_ptr_array_free((*mesh)->mats, TRUE);
+  g_free((*mesh)->texture_atlas->id_data);
   g_free((*mesh)->texture_atlas->diffuse_data);
   g_free((*mesh)->texture_atlas->normal_data);
   g_free((*mesh)->texture_atlas->position_data);
@@ -494,14 +480,52 @@ void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale) {
   g_string_free(obj, TRUE);
 }
 
+// static gboolean sweep(struct collider_s *colliders, guint num_colliders,
+//                       struct vec3_s p0, struct vec3_s p1, guint *hit_idx,
+//                       struct vec3_s *hit_p, guint ignore_id) {
+//   struct vec3_s p;
+//   gint idx = -1;
+//   for (guint i = 0; i < num_colliders; i++) {
+//     if (colliders[i].poly_id == ignore_id) {
+//       continue;
+//     }
+//     if (sweep_collision(&colliders[i], p0, p1, &p)) {
+//       p1 = p;
+//       idx = i;
+//     }
+//   }
+//   if (hit_idx)
+//     *hit_idx = (guint)idx;
+//   if (hit_p)
+//     *hit_p = p1;
+//   return idx >= 0;
+// }
+
+static gboolean sweep_quick(struct collider_s *colliders, guint num_colliders,
+                            struct vec3_s p0, struct vec3_s p1,
+                            guint ignore_id) {
+
+  for (guint i = 0; i < num_colliders; i++) {
+    if (colliders[i].poly_id == ignore_id) {
+      continue;
+    }
+    if (sweep_collision(&colliders[i], p0, p1, NULL)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 void create_mesh_g_buffer(struct mesh_s *mesh) {
   struct atlas_s *atlas = mesh->texture_atlas;
+  atlas->id_data = g_new(guint, atlas->width * atlas->height);
   atlas->diffuse_data = g_new(struct rgba_s, atlas->width * atlas->height);
   atlas->normal_data = g_new(struct vec3_s, atlas->width * atlas->height);
   atlas->position_data = g_new(struct vec3_s, atlas->width * atlas->height);
 
   g_print("creating g-buffer atlas %ux%u...\n", atlas->width, atlas->height);
   for (guint i = 0; i < atlas->width * atlas->height; i++) {
+    atlas->id_data[i] = (guint)(-1);
     atlas->diffuse_data[i] = (struct rgba_s){{{0, 0, 0, 255}}};
     atlas->normal_data[i] = vec3_set(0.0f, 0.0f, 1.0f);
     atlas->position_data[i] = vec3_set(0.0f, 0.0f, 0.0f);
@@ -530,6 +554,7 @@ void create_mesh_g_buffer(struct mesh_s *mesh) {
         //   continue;
         // }
         guint dst_idx = dst_y * atlas->width + dst_x;
+        atlas->id_data[dst_idx] = poly->face_id;
         atlas->diffuse_data[dst_idx] = poly_colors[i];
         atlas->normal_data[dst_idx] = poly->plane_normal;
         atlas->position_data[dst_idx] =
@@ -538,20 +563,67 @@ void create_mesh_g_buffer(struct mesh_s *mesh) {
     }
   }
 
-  struct vec3_s lightpos = vec3_set(0.0f, 0.0f, 0.0f);
+  // for (guint i = 0; i < atlas->width * atlas->height; i++) {
+  //   struct vec3_s pos = atlas->position_data[i];
+  //   struct vec3_s normal = vec3_norm(atlas->normal_data[i]);
+  //   struct vec3_s lightdir = vec3_sub(vec3_zero(), pos);
+  //   float len = sqrtf(vec3_dot(lightdir, lightdir));
+  //   lightdir = vec3_mul(lightdir, 1.0f / len);
+  //   gfloat diff = 1000.0f * MAX(vec3_dot(normal, lightdir), 0.0f) / len;
+  //   gfloat intensity = sqrtf(CLAMP(diff, 0.0f, 1.0f));
+  //   atlas->diffuse_data[i].r =
+  //       (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].r * intensity);
+  //   atlas->diffuse_data[i].g =
+  //       (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].g * intensity);
+  //   atlas->diffuse_data[i].b =
+  //       (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].b * intensity);
+  // }
+
+  guint num_colliders = mesh->polys->len;
+  struct collider_s *colliders = g_new(struct collider_s, num_colliders);
+  for (guint i = 0; i < num_colliders; i++) {
+    struct poly_s *poly = &g_array_index(mesh->polys, struct poly_s, i);
+    init_collider(&colliders[i], poly, mesh->vertices);
+  }
+  export_colliders_to_obj(colliders, num_colliders, "colliders.obj");
+  struct collision_partitions_8x8x8_s partitions;
+  create_collision_partitions(&partitions, colliders, num_colliders);
+
+  struct collision_partitions_8x8x8_sweeper_s sweeper;
+  sweeper.colliders = colliders;
+  sweeper.num_colliders = num_colliders;
+  sweeper.test_val = 1;
+  sweeper.test_masks = g_new(guint, num_colliders);
+  sweeper.test_indices = g_new(LISTOF(index), 1);
+  LIST_INIT(sweeper.test_indices, 256);
+
+  struct vec3_s lightpos = vec3_zero();
+  gint64 t0 = now_us();
   for (guint i = 0; i < atlas->width * atlas->height; i++) {
-    struct vec3_s pos = atlas->position_data[i];
-    struct vec3_s normal = vec3_norm(atlas->normal_data[i]);
-    // gfloat diff = MAX(vec3_dot(normal, lightdir), 0.0f);
-    struct vec3_s lightdir = vec3_sub(lightpos, pos);
-    float len_sq = vec3_dot(lightdir, lightdir);
-    float len = sqrtf(len_sq);
-    lightdir = vec3_mul(lightdir, 1.0f / len);
-    gfloat ambient = 0.1f;
-    gfloat diff = MAX(vec3_dot(normal, lightdir), 0.0f);
-    gfloat intensity = 255.0f / len; // diff / (0.1f * len_sq); // +
-    // ambient;
-    intensity = sqrtf(CLAMP(intensity, 0.0f, 1.0f));
+    guint id = atlas->id_data[i];
+    if (id == (guint)(-1)) {
+      continue;
+    }
+    struct vec3_s n = vec3_norm(atlas->normal_data[i]);
+    if (vec3_dot(n, n) < 1e-12f) {
+      continue; // not a valid point
+    }
+
+    struct vec3_s p0 = vec3_add(atlas->position_data[i], vec3_mul(n, 1e-3f));
+    struct vec3_s v = vec3_sub(lightpos, atlas->position_data[i]);
+    gfloat len_sq = vec3_lensq(v);
+    gfloat len = sqrtf(len_sq);
+    v = vec3_mul(v, 1.0 / len);
+    gfloat ndotl = vec3_dot(n, v);
+    ndotl = MAX(ndotl, 0.0f);
+
+    // gboolean collided = sweep_quick(colliders, num_colliders, p0, lightpos,
+    // id);
+    gboolean collided =
+        sweep_collision_partitions(&partitions, &sweeper, p0, lightpos, id);
+    gfloat diff = collided ? 0.0f : ndotl * SQ(500) / len_sq;
+
+    gfloat intensity = sqrtf(CLAMP(diff, 0.0f, 1.0f)); // linear -> srgb approx
     atlas->diffuse_data[i].r =
         (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].r * intensity);
     atlas->diffuse_data[i].g =
@@ -559,11 +631,302 @@ void create_mesh_g_buffer(struct mesh_s *mesh) {
     atlas->diffuse_data[i].b =
         (guint8)CLAMP_COLOR_COMPONENT(atlas->diffuse_data[i].b * intensity);
   }
+
+  gint64 t1 = now_us();
+  g_print("Processing time: %lf seconds\n", (double)(t1 - t0) * 1e-6);
   unsigned error = lodepng_encode32_file("diffuse.png", atlas->diffuse_data,
                                          atlas->width, atlas->height);
   if (error) {
     g_error("error %u: %s\n", error, lodepng_error_text(error));
   }
-
+  sweeper.colliders = NULL;
+  g_free(sweeper.test_masks);
+  LIST_FREE(sweeper.test_indices);
+  g_free(sweeper.test_indices);
+  free_collision_partitions(&partitions);
+  for (guint i = 0; i < mesh->polys->len; i++) {
+    free_collider(&colliders[i]);
+  }
+  g_free(colliders);
   g_free(poly_colors);
+}
+
+void init_collider(struct collider_s *collider, const struct poly_s *poly,
+                   const GArray *vertices) {
+  collider->poly_id = poly->face_id;
+  collider->centroid = vec3_zero();
+  collider->radius = 0.0f;
+  collider->edge_count = poly->num_vertices;
+  collider->edge_normals = g_new(struct vec3_s, poly->num_vertices);
+  collider->edge_dists = g_new(gfloat, poly->num_vertices);
+  collider->ps = g_new(struct vec3_s, poly->num_vertices);
+
+  for (guint i = 0; i < poly->num_vertices; i++) {
+    guint idx = poly->vertices[i];
+    collider->ps[i] = g_array_index(vertices, struct vertex_s, idx).position;
+  }
+  collider->face_normal = vec3_mul(vec3_norm(poly->plane_normal), -1.0f);
+  collider->face_dist = vec3_dot(collider->ps[0], collider->face_normal);
+
+  for (guint i = 0; i < poly->num_vertices; i++) {
+    collider->centroid = vec3_add(collider->centroid, collider->ps[i]);
+  }
+  collider->centroid =
+      vec3_mul(collider->centroid, 1.0f / (gfloat)(poly->num_vertices));
+  for (guint i = 0; i < poly->num_vertices; i++) {
+    struct vec3_s r = vec3_sub(collider->ps[i], collider->centroid);
+    gfloat len_sq = vec3_dot(r, r);
+    collider->radius = MAX(collider->radius, len_sq);
+  }
+  collider->radius = sqrtf(collider->radius);
+
+  for (guint i = 0; i < poly->num_vertices; i++) {
+    struct vec3_s p0 = collider->ps[i];
+    struct vec3_s p1 = collider->ps[(i + 1) % poly->num_vertices];
+    struct vec3_s n = vec3_cross(vec3_sub(p1, p0), collider->face_normal);
+    collider->edge_normals[i] = vec3_norm(n);
+    collider->edge_dists[i] = vec3_dot(collider->edge_normals[i], p0);
+    if (vec3_dot(collider->centroid, collider->edge_normals[i]) >
+        collider->edge_dists[i]) {
+      collider->edge_normals[i] = vec3_mul(collider->edge_normals[i], -1.0f);
+      collider->edge_dists[i] = -collider->edge_dists[i];
+      g_print("poly %u edge %u pointing the wrong way!\n", collider->poly_id,
+              i);
+    }
+  }
+}
+
+static gboolean sweep_plane(struct vec3_s plane_norm, gfloat plane_dist,
+                            struct vec3_s p0, struct vec3_s p1,
+                            struct vec3_s *hit_p) {
+  struct vec3_s d = vec3_sub(p1, p0);
+  gfloat len_sq = vec3_dot(d, d);
+  if (len_sq < 1e-12f) {
+    return FALSE; // no movement
+  }
+  gfloat len = sqrtf(len_sq);
+  d = vec3_mul(d, 1.0f / len);
+
+  gfloat ddotn = vec3_dot(d, plane_norm);
+  if (fabsf(ddotn) < 1e-6f) {
+    return FALSE; // parallel
+  }
+  gfloat dp0 = vec3_dot(plane_norm, p0) - plane_dist;
+  gfloat dp1 = vec3_dot(plane_norm, p1) - plane_dist;
+  if (dp0 >= 1e-6f && dp1 >= 1e-6f) {
+    return FALSE;
+  }
+  if (dp0 <= -1e-6f && dp1 <= -1e-6f) {
+    return FALSE;
+  }
+  // n . (p + t*d) = dist
+  // n.p + t * n.d = dist
+  // t = (dist - n.p) / n.d
+  gfloat t = (plane_dist - vec3_dot(plane_norm, p0)) / ddotn;
+  if (t < -1e-6f || t > len + 1e-6f) {
+    return FALSE;
+  }
+  if (hit_p) {
+    *hit_p = vec3_add(p0, vec3_mul(d, t));
+  }
+  return TRUE;
+}
+
+gboolean sweep_collision(const struct collider_s *collider, struct vec3_s p0,
+                         struct vec3_s p1, struct vec3_s *hit_p) {
+  struct vec3_s p;
+  if (!sweep_plane(collider->face_normal, collider->face_dist, p0, p1, &p)) {
+    return FALSE;
+  }
+  for (guint i = 0; i < collider->edge_count; i++) {
+    gfloat dist = vec3_dot(collider->edge_normals[i], p);
+    if (dist > (collider->edge_dists[i] + 1e-6f)) {
+      return FALSE;
+    }
+  }
+  if (hit_p) {
+    *hit_p = p;
+  }
+  return TRUE;
+}
+
+void free_collider(struct collider_s *collider) {
+  g_free(collider->ps);
+  g_free(collider->edge_normals);
+  g_free(collider->edge_dists);
+  collider->edge_normals = NULL;
+  collider->edge_dists = NULL;
+  collider->centroid = vec3_zero();
+  collider->radius = 0.0f;
+  collider->edge_count = 0;
+  collider->poly_id = 0;
+}
+
+void export_colliders_to_obj(const struct collider_s *colliders,
+                             guint num_colliders, const gchar *filename) {
+  GString *obj = g_string_new(NULL);
+
+  g_print("# of colliders: %u\n", num_colliders);
+  for (guint i = 0; i < num_colliders; i++) {
+    const struct collider_s *collider = &colliders[i];
+    for (guint j = 0; j < collider->edge_count; j++) {
+      struct vec3_s p = vec3_mul(collider->ps[j], 0.025);
+      g_string_append_printf(obj, "v %f %f %f\n", p.x, p.y, p.z);
+    }
+  }
+  guint vertex_offset = 1;
+  for (guint i = 0; i < num_colliders; i++) {
+    const struct collider_s *collider = &colliders[i];
+    g_string_append_printf(obj, "f ");
+    for (guint j = 0; j < collider->edge_count; j++) {
+      guint vi = vertex_offset + j;
+      g_string_append_printf(obj, "%u ", vi);
+    }
+    g_string_append_c(obj, '\n');
+    vertex_offset += collider->edge_count;
+  }
+
+  g_file_set_contents(filename, obj->str, -1, NULL);
+  g_print("exported colliders to OBJ file '%s'\n", filename);
+  g_string_free(obj, TRUE);
+}
+
+void ray_ortho_decomp(const struct ray_s *ray, struct vec3_s p,
+                      struct vec3_s *v_par, struct vec3_s *v_perp) {
+  struct vec3_s v = vec3_sub(p, ray->o);
+  gfloat t = vec3_dot(v, ray->d);
+  if (v_par) {
+    *v_par = vec3_add(ray->o, vec3_mul(ray->d, t));
+  }
+  if (v_perp) {
+    *v_perp = vec3_sub(v, vec3_mul(ray->d, t));
+  }
+}
+
+gboolean ray_sphere_touch(const struct ray_s *ray, const struct vec3_s origin,
+                          gfloat radius) {
+  struct vec3_s v_perp;
+  struct vec3_s r = vec3_sub(origin, ray->o);
+  if (vec3_dot(r, ray->d) < -radius) {
+    return FALSE;
+  }
+  ray_ortho_decomp(ray, origin, NULL, &v_perp);
+  if (vec3_lensq(v_perp) > SQ(radius)) {
+    return FALSE;
+  }
+  return TRUE;
+}
+
+void create_collision_partitions(
+    struct collision_partitions_8x8x8_s *partitions,
+    struct collider_s *colliders, guint num_colliders) {
+  // compute the average size of the colliders
+  struct vec3_s min, max;
+  min = vec3_set(+FLT_MAX, +FLT_MAX, +FLT_MAX);
+  max = vec3_set(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  for (guint i = 0; i < num_colliders; i++) {
+    const struct collider_s *collider = &colliders[i];
+    for (guint j = 0; j < collider->edge_count; j++) {
+      struct vec3_s p = collider->ps[j];
+      min = vec3_min(min, p);
+      max = vec3_max(max, p);
+    }
+  }
+  struct vec3_s ext = vec3_sub(max, min);
+  float cube_extent = MAX(ext.x, MAX(ext.y, ext.z));
+
+  partitions->origin = vec3_mul(vec3_add(min, max), 0.5f);
+  struct vec3_s half =
+      vec3_set(cube_extent * 0.5f, cube_extent * 0.5f, cube_extent * 0.5f);
+  partitions->min = vec3_sub(partitions->origin, half);
+  partitions->max = vec3_add(partitions->origin, half);
+
+  float size = cube_extent / 8.0f;
+  gfloat halfsize = size * 0.5f;
+  gfloat radius = sqrtf(SQ(halfsize) * 3.0f);
+  guint max_colliders_per = 0;
+  for (guint i = 0; i < 8; i++) {
+    for (guint j = 0; j < 8; j++) {
+      for (guint k = 0; k < 8; k++) {
+        struct collision_partition_s *partition = &partitions->cells[i][j][k];
+        partition->radius = radius;
+        partition->origin =
+            vec3_set(partitions->min.x + halfsize + size * (gfloat)i,
+                     partitions->min.y + halfsize + size * (gfloat)j,
+                     partitions->min.z + halfsize + size * (gfloat)k);
+        partition->colliders = g_new(LISTOF(index), 1);
+        LIST_INIT(partition->colliders, 4);
+        for (guint c = 0; c < num_colliders; c++) {
+          struct collider_s *collider = &colliders[c];
+          struct vec3_s r = vec3_sub(collider->centroid, partition->origin);
+          gfloat dist_sq = vec3_dot(r, r);
+          gfloat radius_sum = collider->radius + partition->radius;
+          if (dist_sq <= SQ(radius_sum)) {
+            LIST_APPEND(partition->colliders, c);
+          }
+          max_colliders_per = MAX(max_colliders_per, partition->colliders->len);
+        }
+      }
+    }
+  }
+  g_print("collision partitions created (max colliders per partition: %u)\n",
+          max_colliders_per);
+}
+
+void free_collision_partitions(
+    struct collision_partitions_8x8x8_s *partitions) {
+  for (guint i = 0; i < 8; i++) {
+    for (guint j = 0; j < 8; j++) {
+      for (guint k = 0; k < 8; k++) {
+        struct collision_partition_s *partition = &partitions->cells[i][j][k];
+        LIST_FREE(partition->colliders);
+      }
+    }
+  }
+}
+
+gboolean
+sweep_collision_partitions(struct collision_partitions_8x8x8_s *partitions,
+                           struct collision_partitions_8x8x8_sweeper_s *sweeper,
+                           struct vec3_s p0, struct vec3_s p1,
+                           guint ignore_id) {
+  struct ray_s ray;
+  ray.o = p0;
+  ray.d = vec3_norm(vec3_sub(p1, p0));
+  sweeper->test_val++;
+  sweeper->test_masks[ignore_id] = sweeper->test_val;
+  sweeper->test_indices->len = 0;
+
+  for (guint i = 0; i < 8; i++) {
+    for (guint j = 0; j < 8; j++) {
+      for (guint k = 0; k < 8; k++) {
+        struct collision_partition_s *partition = &partitions->cells[i][j][k];
+        if (partition->colliders->len == 0) {
+          continue;
+        }
+        if (!ray_sphere_touch(&ray, partition->origin, partition->radius)) {
+          continue;
+        }
+        for (guint i = 0; i < partition->colliders->len; i++) {
+          guint collider_idx = partition->colliders->data[i];
+          if (sweeper->test_masks[collider_idx] != sweeper->test_val) {
+            // if (ray_sphere_touch(&ray, colliders[collider_idx].centroid,
+            //                      colliders[collider_idx].radius)) {
+            //   LIST_APPEND(tests, collider_idx);
+            // }
+            LIST_APPEND(sweeper->test_indices, collider_idx);
+            sweeper->test_masks[collider_idx] = sweeper->test_val;
+          }
+        }
+      }
+    }
+  }
+  for (guint i = 0; i < sweeper->test_indices->len; i++) {
+    guint collider_idx = sweeper->test_indices->data[i];
+    const struct collider_s *collider = &sweeper->colliders[collider_idx];
+    if (sweep_collision(collider, p0, p1, NULL)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
 }
