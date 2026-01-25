@@ -341,7 +341,7 @@ void export_mesh_with_lmap_to_obj(struct mesh_s *mesh, gfloat scale) {
   }
 
   // Output to file
-  g_file_set_contents("output.obj", obj->str, obj->len, NULL);
+  g_file_set_contents("lightmap_, obj->str, obj->len, NULL);
   g_string_free(obj, TRUE);
 }
 
@@ -777,6 +777,7 @@ int main(int argc, char **argv) {
   g_free(palette);
   free_mesh(&mesh);
   g_free(mesh);
+  GridTr_prmemstats();
   g_print("Done. Goodbye!\n");
   return 0;
 }
