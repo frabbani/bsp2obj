@@ -1,5 +1,6 @@
 #!/bin/bash
 
+clear
 echo "cleaning..."
 rm -rf export/textures/*.png
 # rm -rf *.obj

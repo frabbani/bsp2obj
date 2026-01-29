@@ -341,7 +341,7 @@ void export_mesh_with_lmap_to_obj(struct mesh_s *mesh, gfloat scale) {
   }
 
   // Output to file
-  g_file_set_contents("lightmap_, obj->str, obj->len, NULL);
+  g_file_set_contents("lightmap_mesh.obj", obj->str, obj->len, NULL);
   g_string_free(obj, TRUE);
 }
 
@@ -751,7 +751,8 @@ int main(int argc, char **argv) {
   g_print("mesh built. exporting...\n");
   export_mesh_with_lmap_to_obj(mesh, 0.025f);
   g_print("lightmap OBJ exported.\n");
-  export_mesh_with_mats_to_obj(mesh, 0.025f);
+  const char *mats[] = {"sky", "water"};
+  export_mesh_with_mats_to_obj_2(mesh, 0.025f, mats, 2);
   g_print("material OBJ exported.\n");
   export_mesh_to_gltf(mesh, 0.025f, "mesh.gltf", &err);
   g_print("GLTF exported.\n");

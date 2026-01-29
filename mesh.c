@@ -189,7 +189,7 @@ struct mat_s *mesh_add_get_material(struct mesh_s *mesh,
   struct mat_s *stored = g_new(struct mat_s, 1);
   g_strlcpy(stored->name, material_name, sizeof(stored->name) - 1);
   stored->polys = g_new(LISTOF(index), 1);
-  LIST_INIT(stored->polys, 16);
+  LIST_INIT(stored->polys, 32);
   stored->texture_data = NULL;
   stored->tris = NULL;
   g_hash_table_insert(mesh->material_map, g_strdup(material_name), stored);
@@ -486,6 +486,86 @@ void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale) {
   g_string_free(obj, TRUE);
 }
 
+void export_mesh_with_mats_to_obj_2(struct mesh_s *mesh, gfloat scale,
+                                    const char **ignore_mats,
+                                    int ignore_count) {
+  GString *obj = g_string_new(NULL);
+  /*
+  newmtl lightmap
+  Ka 1 1 1
+  Kd 1 1 1
+  Ks 0 0 0
+  Tr 1
+  illum 1
+  Ns 0
+  map_Kd export/textures/name.png
+  */
+
+  // Write material
+  for (guint i = 0; i < mesh->mats->len; i++) {
+    struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
+    g_string_append_printf(obj, "newmtl %s\n", mat->name);
+    g_string_append(obj, "Ka 1 1 1\n");
+    g_string_append(obj, "Kd 1 1 1\n");
+    g_string_append(obj, "Ks 0 0 0\n");
+    g_string_append(obj, "Tr 1\n");
+    g_string_append(obj, "illum 1\n");
+    g_string_append(obj, "Ns 0\n");
+    g_string_append_printf(obj, "map_Kd export/textures/%s.png\n", mat->name);
+  }
+  g_file_set_contents("mesh.mtl", obj->str, obj->len, NULL);
+  g_string_free(obj, TRUE);
+
+  // Wrote model
+  obj = g_string_new(NULL);
+  g_string_append(obj, "mtllib mesh.mtl\n");
+
+  int vertex_offset = 1;
+  for (guint i = 0; i < mesh->mats->len; i++) {
+    struct mat_s *mat = g_ptr_array_index(mesh->mats, i);
+    bool skip = false;
+    for (int j = 0; j < ignore_count; j++) {
+      if (g_strrstr(mat->name, ignore_mats[j]) != NULL) {
+        g_print(" - skipping material '%s'\n", mat->name);
+        skip = true;
+        break;
+      }
+    }
+    if (skip)
+      continue;
+    g_string_append_printf(obj, "usemtl %s\n", mat->name);
+
+    // Write faces
+    for (guint j = 0; j < mat->polys->len; j++) {
+      guint poly_idx = mat->polys->data[j];
+      struct poly_s *poly =
+          &g_array_index(mesh->polys, struct poly_s, poly_idx);
+      for (guint k = 0; k < poly->num_vertices; k++) {
+        guint v_idx = poly->vertices[k];
+        struct vertex_s *v =
+            &g_array_index(mesh->vertices, struct vertex_s, v_idx);
+        g_string_append_printf(obj, "v %g %g %g\n", v->position.x * scale,
+                               v->position.y * scale, v->position.z * scale);
+        g_string_append_printf(obj, "vt %g %g\n", v->uvs[0].x, v->uvs[0].y);
+      }
+      for (guint k = 1; k < poly->num_vertices; k++) {
+        uint v0 = vertex_offset;
+        uint v1 = vertex_offset + k;
+        uint v2 = vertex_offset + ((k + 1) % poly->num_vertices);
+        g_string_append(obj, "f");
+        g_string_append_printf(obj, " %u/%u", v0, v0);
+        g_string_append_printf(obj, " %u/%u", v1, v1);
+        g_string_append_printf(obj, " %u/%u", v2, v2);
+        g_string_append_c(obj, '\n');
+      }
+      vertex_offset += poly->num_vertices;
+    }
+  }
+
+  g_file_set_contents("mesh.obj", obj->str, obj->len, NULL);
+  g_string_free(obj, TRUE);
+}
+
 static gboolean sweep_plane(struct GridTr_plane_s plane,
                             const struct GridTr_rayseg_s *rayseg,
                             struct vec3_s *hit_p) {
@@ -538,9 +618,19 @@ gboolean sweep_collider(const struct GridTr_collider_s *collider,
 }
 
 struct trace_data_s {
+  uint32 id;
   gboolean hit;
   struct vec3_s hit_p;
 };
+
+bool same_planes(const struct GridTr_plane_s *a,
+                 const struct GridTr_plane_s *b) {
+  float dot = vec3_dot(a->n, b->n);
+  if (dot < 1.0f - 1e-12f) {
+    return FALSE;
+  }
+  return fabsf(a->dist - b->dist) < 1e-3f;
+}
 
 bool trace_cb(const struct GridTr_grid_cell_s *cell, struct ivec3_s crl,
               const struct GridTr_rayseg_s *rayseg,
@@ -553,6 +643,9 @@ bool trace_cb(const struct GridTr_grid_cell_s *cell, struct ivec3_s crl,
   data->hit = FALSE;
   for (uint i = 0; i < cell->num_colliders; i++) {
     const struct GridTr_collider_s *collider = &colliders[cell->colliders[i]];
+    if (collider->poly_id == data->id) {
+      continue;
+    }
     if (sweep_collider(collider, rayseg, &data->hit_p)) {
       data->hit = TRUE;
       return true; // stop traversal
@@ -601,7 +694,7 @@ void create_mesh_g_buffer(struct mesh_s *mesh) {
   for (guint i = 0; i < atlas->width * atlas->height; i++) {
     atlas->id_data[i] = (guint)(-1);
     atlas->diffuse_data[i] = (struct rgba_s){{{0, 0, 0, 255}}};
-    atlas->normal_data[i] = vec3_set(0.0f, 0.0f, 1.0f);
+    atlas->normal_data[i] = vec3_zero();
     atlas->position_data[i] = vec3_set(0.0f, 0.0f, 0.0f);
   }
 
@@ -665,18 +758,25 @@ void create_mesh_g_buffer(struct mesh_s *mesh) {
     if (id == (guint)(-1)) {
       continue;
     }
-    struct vec3_s n = vec3_norm(atlas->normal_data[i]);
+    struct vec3_s n = vec3_mul(atlas->normal_data[i], +1.0f);
     if (vec3_dot(n, n) < 1e-12f) {
       continue; // not a valid point
     }
 
-    struct vec3_s p0 = vec3_add(atlas->position_data[i], vec3_mul(n, 1e-3f));
+    struct vec3_s p0 = atlas->position_data[i];
+    p0 = vec3_add(p0, vec3_mul(n, 1e-3f));
+    //   (t*d).n = 1e-3
+    //   t = 1e-3 / d.n
+    // struct vec3_s d = vec3_norm(point_vec(p0, lightpos));
+    // float ddotn = fabsf(vec3_dot(n, d));
+    // p0 = vec3_add(p0, vec3_mul(d, 1e-3f / ddotn));
     struct GridTr_rayseg_s rayseg = GridTr_create_rayseg(p0, lightpos);
-    gfloat ndotl = vec3_dot(n, rayseg.d);
+    gfloat ndotl = 1.0f; //-vec3_dot(n, rayseg.d);
     ndotl = MAX(ndotl, 0.0f);
 
     struct trace_data_s data = {0};
     data.hit = false;
+    data.id = id;
     if (GridTr_trace_ray_through_grid(&grid, &rayseg, trace_cb, &data)) {
       ndotl = 0.0f;
     }

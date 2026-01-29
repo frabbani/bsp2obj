@@ -10,6 +10,7 @@
     type *data;                                                                \
     guint len;                                                                 \
     guint capacity;                                                            \
+    guint growth;                                                              \
   };
 
 #define LISTOF(name) struct name##list_s
@@ -18,13 +19,13 @@
   {                                                                            \
     list->data = g_new(typeof(*list->data), initial_capacity);                 \
     list->len = 0;                                                             \
-    list->capacity = initial_capacity;                                         \
+    list->capacity = list->growth = initial_capacity;                          \
   }
 
 #define LIST_APPEND(list, value)                                               \
   do {                                                                         \
     if (list->len >= list->capacity) {                                         \
-      list->capacity += list->capacity;                                        \
+      list->capacity += list->growth;                                          \
       list->data =                                                             \
           g_realloc(list->data, sizeof(*(list)->data) * list->capacity);       \
     }                                                                          \
@@ -37,6 +38,7 @@
     list->data = NULL;                                                         \
     list->len = 0;                                                             \
     list->capacity = 0;                                                        \
+    list->growth = 0;                                                          \
   } while (0);
 
 LIST(guint, index);
@@ -134,6 +136,8 @@ extern void build_mesh(struct mesh_s *mesh, const struct texinfo_s *texinfos,
 extern void free_mesh(struct mesh_s **mesh);
 
 extern void export_mesh_with_mats_to_obj(struct mesh_s *mesh, gfloat scale);
+void export_mesh_with_mats_to_obj_2(struct mesh_s *mesh, gfloat scale,
+                                    const char **ignore_mats, int ignore_count);
 
 extern void create_mesh_g_buffer(struct mesh_s *mesh);
 #endif // _MESH_
